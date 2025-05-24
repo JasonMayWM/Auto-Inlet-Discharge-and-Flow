@@ -442,9 +442,9 @@ void printBuffer(CircularBuffer &cb, const char *label, bool isInlet) {
     float pressure;
     if (isInlet) {
       float actualPressureInBar = rawValue / 100.0f;
-      pressure = actualPressureInBar + INLET_SENSOR_OFFSET;
+      pressure = rawValue/100.0f;/*actualPressureInBar + INLET_SENSOR_OFFSET;*/
     } else {
-      pressure = rawValue * DISCHARGE_PRESSURE_CONV + DISCHARGE_SENSOR_OFFSET;
+      pressure = rawValue/100.0f; /* * DISCHARGE_PRESSURE_CONV + DISCHARGE_SENSOR_OFFSET;*/
     }
 
     Serial.printf(",%.2f", pressure);  // Add comma before each value
