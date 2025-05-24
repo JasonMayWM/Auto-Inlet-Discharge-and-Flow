@@ -89,7 +89,7 @@ float maxPressureInlet = 0.0;
 float minimumPressureInlet = -1.0;
 float maxPressureDischarge = 7.0;
 float minimumPressureDischarge = 0.2;
-const float PRESSURE_RESPONSE_RATE = 0.05; // Lower = slower response (e.g., 0.01 to 0.1)
+const float PRESSURE_RESPONSE_RATE = 0.05;  // Lower = slower response (e.g., 0.01 to 0.1)
 const float INLET_PRESSURE_PER_STEP = minimumPressureInlet / maxStepsInlet;
 bool targetPressure = false;
 bool targetDischargePressure = false;
@@ -101,7 +101,7 @@ bool controlEnableDischarge = true;
 
 // === Circular Buffer ===
 const int arraySize = 20;
-int avgSampTime = 1000000/arraySize;  // Sampling time in microseconds
+int avgSampTime = 1000000 / arraySize;  // Sampling time in microseconds
 
 // === Serial Communication ===
 const byte numChars = 16;
@@ -139,9 +139,9 @@ struct CircularBuffer {
   }
 };
 
-CircularBuffer dischargeFilo;  // Circular array for discharge pressure sensor
-CircularBuffer inletFilo;      // Circular array for inlet pressure sensor
-CircularBuffer flowFilo;  // Circular array for simulated flow sensor
+CircularBuffer dischargeFilo;      // Circular array for discharge pressure sensor
+CircularBuffer inletFilo;          // Circular array for inlet pressure sensor
+CircularBuffer flowFilo;           // Circular array for simulated flow sensor
 volatile float currentFlow = 0.0;  // Current simulated flow value
 
 void pressureSensorCore1();  // Core 1 Function Declaration
@@ -175,16 +175,29 @@ void loop() {
 
     printBuffer(inletFilo, "Inlet", true);
     printBuffer(dischargeFilo, "Discharge", false);
-    printBuffer(flowFilo, "Flow",false);
+    printBuffer(flowFilo, "Flow", false);
     delay(10);
   }
 }
+
+float simulateFlowSensor(float inletPressure, float dischargePressure) {
+  const float BASE_FLOW = 1.5;
+  const float k_discharge = 0.0714;  // L/min per bar
+  const float k_inlet = 2.0;         // L/min per bar
+
+  float flow = BASE_FLOW - k_discharge * dischargePressure + k_inlet * inletPressure;
+
+  // Clamp flow to valid range
+  if (flow < 0) flow = 0;
+  return flow;
+}
+
 
 void pressureSensorCore1() {
   while (true) {
     // Simulated target pressure based on step count
     float targetPressureInletSim = stepCountInlet * INLET_PRESSURE_PER_STEP;
-    
+
     // Exponential smoothing to simulate lag
     currentPressureInlet += (targetPressureInletSim - currentPressureInlet) * PRESSURE_RESPONSE_RATE;
 
@@ -197,14 +210,11 @@ void pressureSensorCore1() {
     dischargeFilo.push((int)(currentPressureDischarge * 100));
 
     // Simulate flow as pressure difference × scaling
-    float pressureDiff = currentPressureDischarge - currentPressureInlet;
-    float simulatedFlow = pressureDiff * 10.0;
-    if (simulatedFlow < 0) simulatedFlow = 0;
-
-    flowFilo.push((int)(simulatedFlow * 100));
+    float flowReading = simulateFlowSensor(currentPressureInlet, currentPressureDischarge);
+    flowFilo.push((int)(flowReading * 100.0));
     currentFlow = flowFilo.average() / 100.0;
 
-    sleep_us(avgSampTime); // pacing if needed
+    sleep_us(avgSampTime);  // pacing if needed
   }
 }
 
@@ -228,8 +238,7 @@ void pressureControlInlet() {
       Serial.println("Inlet zero position achieved");
       notifyInlet = true;
     }
-  }
-  else {  // If neither condition is met
+  } else {  // If neither condition is met
     targetPressure = false;
   }
   if ((int32_t)micros() - motorLastStepTime >= intervalInlet && !targetPressure && controlEnableInlet && !reset) {  // Adjust pressure if needed
@@ -254,8 +263,7 @@ void pressureControlDischarge() {
       Serial.println("Discharge zero position achieved");
       notifyDischarge = true;
     }
-  }
-  else {  // Otherwise, target pressure is not achieved
+  } else {  // Otherwise, target pressure is not achieved
     targetDischargePressure = false;
   }
   if ((int32_t)micros() - motorLastStepTimeDischarge >= intervalDischarge && !targetDischargePressure && controlEnableDischarge && !reset) {  // Adjust pressure if needed
@@ -293,15 +301,15 @@ void adjustPressureDischarge() {
   }
 }
 
-void setMotorDirectionInlet(bool direction) { // Function to set motor direction based on motorDirectionInlet value
+void setMotorDirectionInlet(bool direction) {  // Function to set motor direction based on motorDirectionInlet value
   if (motorDirectionInlet) {
-    digitalWrite(dirPinInlet, !direction);    // Invert direction if motorDirectionInlet is true
+    digitalWrite(dirPinInlet, !direction);  // Invert direction if motorDirectionInlet is true
   } else {
-    digitalWrite(dirPinInlet, direction);    // Otherwise, use the direction as is
+    digitalWrite(dirPinInlet, direction);  // Otherwise, use the direction as is
   }
   if (direction != previousDirectionInlet) {  // Check if the direction has changed
-    stepCountAccInlet = 0;               // Reset stepCountAcc to zero on direction change
-    previousDirectionInlet = direction;  // Update the previous direction
+    stepCountAccInlet = 0;                    // Reset stepCountAcc to zero on direction change
+    previousDirectionInlet = direction;       // Update the previous direction
   }
 }
 
@@ -315,7 +323,7 @@ void calculateIntervalInlet() {
   }
 
   if (errorInlet < 0.2 && setPressureInlet != 0 || currentPressureInlet <= -0.25) {  // Check if within 0.1 bar of target pressure
-    intervalInlet = intervalRunInlet * 16.0;  // Slow down (double the interval)
+    intervalInlet = intervalRunInlet * 16.0;                                         // Slow down (double the interval)
   } else if (errorInlet < 0.15 && setPressureInlet != 0) {
     intervalInlet = intervalRunInlet * 40.0;
   } else {
@@ -323,7 +331,7 @@ void calculateIntervalInlet() {
   }
 }
 
-void moveMotorInlet(bool direction) { // Updated moveMotor function with acceleration
+void moveMotorInlet(bool direction) {  // Updated moveMotor function with acceleration
   if (controlEnableInlet) {
     setMotorDirectionInlet(direction);  // Use setmotorDirectionInlet to control dirPinInlet
     calculateIntervalInlet();           // Update interval based on step count for acceleration
@@ -442,9 +450,9 @@ void printBuffer(CircularBuffer &cb, const char *label, bool isInlet) {
     float pressure;
     if (isInlet) {
       float actualPressureInBar = rawValue / 100.0f;
-      pressure = rawValue/100.0f;/*actualPressureInBar + INLET_SENSOR_OFFSET;*/
+      pressure = rawValue / 100.0f; /*actualPressureInBar + INLET_SENSOR_OFFSET;*/
     } else {
-      pressure = rawValue/100.0f; /* * DISCHARGE_PRESSURE_CONV + DISCHARGE_SENSOR_OFFSET;*/
+      pressure = rawValue / 100.0f; /* * DISCHARGE_PRESSURE_CONV + DISCHARGE_SENSOR_OFFSET;*/
     }
 
     Serial.printf(",%.2f", pressure);  // Add comma before each value
