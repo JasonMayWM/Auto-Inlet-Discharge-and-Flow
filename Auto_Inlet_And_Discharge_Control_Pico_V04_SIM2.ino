@@ -18,7 +18,7 @@ const float MY_ADC_RESOLUTION = 4095.0;
 // Inlet Sensor
 const float INLET_SENSOR_SCALE = 0.99;
 const float INLET_SENSOR_RANGE = 2.0;  // -1 to +1 bar
-const float INLET_SENSOR_OFFSET = -1.0;
+const float INLET_SENSOR_OFFSET = 0.0f;
 const float INLET_PRESSURE_CONV = (INLET_SENSOR_RANGE * INLET_SENSOR_SCALE / MY_ADC_RESOLUTION);
 
 // Discharge Sensor
@@ -86,11 +86,11 @@ float avgVoltage = 0.0;
 float pressureToleranceInlet = 0.02;
 float pressureToleranceDischarge = 0.05;
 float maxPressureInlet = 0.0;
-float minimumPressureInlet = 1.0;
+float minimumPressureInlet = -1.0;
 float maxPressureDischarge = 7.0;
 float minimumPressureDischarge = 0.2;
 const float PRESSURE_RESPONSE_RATE = 0.05; // Lower = slower response (e.g., 0.01 to 0.1)
-const float INLET_PRESSURE_PER_STEP = maxPressureInlet / maxStepsInlet;
+const float INLET_PRESSURE_PER_STEP = minimumPressureInlet / maxStepsInlet;
 bool targetPressure = false;
 bool targetDischargePressure = false;
 bool notifyInlet = false;
@@ -441,7 +441,8 @@ void printBuffer(CircularBuffer &cb, const char *label, bool isInlet) {
 
     float pressure;
     if (isInlet) {
-      pressure = rawValue * INLET_PRESSURE_CONV + INLET_SENSOR_OFFSET;
+      float actualPressureInBar = rawValue / 100.0f;
+      pressure = actualPressureInBar + INLET_SENSOR_OFFSET;
     } else {
       pressure = rawValue * DISCHARGE_PRESSURE_CONV + DISCHARGE_SENSOR_OFFSET;
     }
