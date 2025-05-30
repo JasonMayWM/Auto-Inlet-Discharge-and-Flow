@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Manage Routines - Workout App</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <header>
+        <h1>Workout Tracker</h1>
+        <nav>
+            <ul>
+                <li><a href="index.html">Home</a></li>
+                <li><a href="exercises.html">Manage Exercises</a></li>
+                <li><a href="routines.html">Manage Routines</a></li>
+                <li><a href="log_workout.html">Log Workout</a></li>
+                <li><a href="history.html">Workout History</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <section id="manage-routines">
+            <h2>Manage Workout Routines</h2>
+
+            <div id="add-routine-form-container">
+                <h3>Create New Routine</h3>
+                <form id="add-routine-form">
+                    <div>
+                        <label for="routine-name">Routine Name:</label>
+                        <input type="text" id="routine-name" name="name" required>
+                    </div>
+                    <div>
+                        <label for="routine-description">Description (Optional):</label>
+                        <textarea id="routine-description" name="description"></textarea>
+                    </div>
+                    <button type="submit">Create Routine</button>
+                    <div id="routine-message" class="message-area"></div>
+                </form>
+            </div>
+
+            <div id="routine-list-container">
+                <h3>Available Routines</h3>
+                <ul id="routine-list">
+                    <!-- Routines will be populated here by JavaScript -->
+                    <li>Loading routines...</li>
+                </ul>
+            </div>
+        </section>
+        
+        <!-- Placeholder for viewing/editing a single routine's exercises -->
+        <section id="routine-details-container" style="display:none;">
+            <h3 id="selected-routine-name"></h3>
+            <h4>Exercises in this Routine:</h4>
+            <ul id="selected-routine-exercises">
+                <!-- exercises for the selected routine -->
+            </ul>
+            <h4>Add Exercise to Routine:</h4>
+            <form id="add-exercise-to-routine-form">
+                <input type="hidden" id="selected-routine-id" name="routine_id">
+                <div>
+                    <label for="exercise-to-add">Select Exercise:</label>
+                    <select id="exercise-to-add" name="exercise_id" required></select>
+                </div>
+                <div>
+                    <label for="order-in-routine">Order:</label>
+                    <input type="number" id="order-in-routine" name="order_in_routine" required min="1">
+                </div>
+                <div><label for="target_sets">Target Sets:</label><input type="number" id="target_sets" name="target_sets" placeholder="e.g., 3" min="1"></div>
+                <div><label for="target_reps">Target Reps (or leave blank for AMRAP):</label><input type="text" id="target_reps" name="target_reps" placeholder="e.g., 5 or AMRAP"></div>
+                <div><label for="duration_minutes">Duration (minutes):</label><input type="number" id="duration_minutes" name="duration_minutes" min="0"></div>
+                <div><label for="rest_seconds">Rest (seconds):</label><input type="number" id="rest_seconds" name="rest_seconds" min="0"></div>
+                <button type="submit">Add to Routine</button>
+                <div id="routine-exercise-message" class="message-area"></div>
+            </form>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2024 Workout App</p>
+    </footer>
+
+    <script src="js/routines.js"></script>
+</body>
+</html>

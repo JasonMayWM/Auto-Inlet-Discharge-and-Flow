@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Log Workout - Workout App</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <header>
+        <h1>Workout Tracker</h1>
+        <nav>
+            <ul>
+                <li><a href="index.html">Home</a></li>
+                <li><a href="exercises.html">Manage Exercises</a></li>
+                <li><a href="routines.html">Manage Routines</a></li>
+                <li><a href="log_workout.html">Log Workout</a></li>
+                <li><a href="history.html">Workout History</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <section id="log-workout-section">
+            <h2>Log Your Workout</h2>
+            <form id="log-workout-form">
+                <div>
+                    <label for="log-type">Log Type:</label>
+                    <select id="log-type" name="log_type">
+                        <option value="routine">Log a Predefined Routine</option>
+                        <option value="exercise">Log a Single Exercise</option>
+                    </select>
+                </div>
+
+                <div id="routine-selection-area">
+                    <label for="routine-select">Choose Routine:</label>
+                    <select id="routine-select" name="routine_id">
+                        <!-- Routines will be populated here -->
+                        <option value="">Loading routines...</option>
+                    </select>
+                </div>
+
+                <div id="exercise-selection-area" style="display:none;">
+                    <label for="exercise-select">Choose Exercise:</label>
+                    <select id="exercise-select" name="exercise_id">
+                        <!-- Exercises will be populated here -->
+                        <option value="">Loading exercises...</option>
+                    </select>
+                </div>
+                
+                <fieldset>
+                    <legend>Performance Details (Optional)</legend>
+                    <div>
+                        <label for="performed_at">Date & Time Performed (Optional - defaults to now):</label>
+                        <input type="datetime-local" id="performed_at" name="performed_at">
+                    </div>
+                     <div>
+                        <label for="performed_sets">Sets Performed:</label>
+                        <input type="number" id="performed_sets" name="performed_sets" min="1" placeholder="e.g., 3">
+                    </div>
+                    <div>
+                        <label for="performed_reps">Reps Performed (per set, or total if single set, or AMRAP):</label>
+                        <input type="text" id="performed_reps" name="performed_reps" placeholder="e.g., 5 or AMRAP">
+                    </div>
+                    <div>
+                        <label for="weight_lifted_kg">Weight Lifted (kg):</label>
+                        <input type="number" step="0.01" id="weight_lifted_kg" name="weight_lifted_kg">
+                    </div>
+                    <div>
+                        <label for="duration_completed_minutes">Duration (minutes):</label>
+                        <input type="number" id="duration_completed_minutes" name="duration_completed_minutes">
+                    </div>
+                    <div>
+                        <label for="log-notes">Notes:</label>
+                        <textarea id="log-notes" name="notes"></textarea>
+                    </div>
+                </fieldset>
+                
+                <button type="submit">Log Workout</button>
+                <div id="log-workout-message" class="message-area"></div>
+            </form>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2024 Workout App</p>
+    </footer>
+
+    <script src="js/log_workout.js"></script>
+</body>
+</html>

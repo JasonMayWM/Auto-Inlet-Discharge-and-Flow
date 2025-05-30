@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Manage Exercises - Workout App</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <header>
+        <h1>Workout Tracker</h1>
+        <nav>
+            <ul>
+                <li><a href="index.html">Home</a></li>
+                <li><a href="exercises.html">Manage Exercises</a></li>
+                <li><a href="routines.html">Manage Routines</a></li>
+                <li><a href="log_workout.html">Log Workout</a></li>
+                <li><a href="history.html">Workout History</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <section id="manage-exercises">
+            <h2>Manage Exercises</h2>
+
+            <div id="add-exercise-form-container">
+                <h3>Add New Exercise</h3>
+                <form id="add-exercise-form">
+                    <div>
+                        <label for="exercise-name">Name:</label>
+                        <input type="text" id="exercise-name" name="name" required>
+                    </div>
+                    <div>
+                        <label for="exercise-description">Description (Optional):</label>
+                        <textarea id="exercise-description" name="description"></textarea>
+                    </div>
+                    <div>
+                        <label for="exercise-muscle-group">Muscle Group (Optional):</label>
+                        <input type="text" id="exercise-muscle-group" name="muscle_group">
+                    </div>
+                    <div>
+                        <label for="exercise-equipment">Equipment (Optional):</label>
+                        <input type="text" id="exercise-equipment" name="equipment">
+                    </div>
+                    <div>
+                        <label for="current-weight">Current Weight (kg):</label>
+                        <input type="number" step="0.01" id="current-weight" name="current_weight" value="0.0">
+                    </div>
+                    <div>
+                        <label for="weight-increment">Weight Increment (kg):</label>
+                        <input type="number" step="0.01" id="weight-increment" name="weight_increment" value="2.5">
+                    </div>
+                    <button type="submit">Add Exercise</button>
+                    <div id="exercise-message" class="message-area"></div>
+                </form>
+            </div>
+
+            <div id="exercise-list-container">
+                <h3>Available Exercises</h3>
+                <table id="exercise-table">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Description</th>
+                            <th>Muscle Group</th>
+                            <th>Equipment</th>
+                            <th>Current Wt. (kg)</th>
+                            <th>Increment (kg)</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="exercise-list">
+                        <!-- Exercises will be populated here by JavaScript -->
+                        <tr><td colspan="7">Loading exercises...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>&copy; 2024 Workout App</p>
+    </footer>
+
+    <script src="js/exercises.js"></script>
+</body>
+</html>
