@@ -1,122 +1,141 @@
 // Raspberry Pi Pico and TB6600 stepper driver set to 1A.
-// Nema17 stepper with 51:1 gearbox, driven with 1/8 microstepPinInletg.
+// Nema17 stepper with 51:1 gearbox, driven with 1/8 microstepping.
+// This code controls two stepper motors (inlet and discharge) to regulate pressure.
+// It uses a Raspberry Pi Pico, with one core handling motor control and serial commands,
+// and the other core (core1) simulating pressure sensor readings.
 
-#include "pico/stdlib.h"
-#include "pico/multicore.h"
-#include <stdio.h>
-#include "hardware/adc.h"
-#include "pico/rand.h"
+#include "pico/stdlib.h"      // Standard library for Raspberry Pi Pico
+#include "pico/multicore.h"   // For using both cores of RP2040
+#include <stdio.h>            // Standard I/O functions (like printf)
+#include "hardware/adc.h"     // For ADC (Analog to Digital Converter) functionalities
+#include "pico/rand.h"        // For random number generation (if needed, currently not explicitly used for core logic)
 
 // === Global State Variables ===
-unsigned long ticktime = 0;
-int top = -1;  // Stack is initially empty
-bool reset = false;
+unsigned long ticktime = 0; // General-purpose timer variable, potentially for measuring elapsed time. Currently not used in critical logic.
+int top = -1;               // Variable related to a stack data structure, possibly for command history or state management. Currently not used.
+bool reset = false;         // Global flag to indicate if the system or motors should be in a reset state.
 
 // === ADC & Sensor Constants ===
+// ADC resolution for the RP2040's internal ADC (12-bit, 0-4095).
 const float MY_ADC_RESOLUTION = 4095.0;
 
-// Inlet Sensor
-const float INLET_SENSOR_SCALE = 0.99;
-const float INLET_SENSOR_RANGE = 2.0;  // -1 to +1 bar
-const float INLET_SENSOR_OFFSET = 0.0f;
+// Inlet Pressure Sensor Configuration
+const float INLET_SENSOR_SCALE = 0.99;   // Scale factor for the inlet pressure sensor.
+const float INLET_SENSOR_RANGE = 2.0;    // Sensor measurement range (e.g., -1 to +1 bar relative, so 2 bar total span).
+const float INLET_SENSOR_OFFSET = 0.0f;  // Offset value for the inlet pressure sensor.
+// Conversion factor: (Range * Scale) / ADC_Resolution. Used to convert ADC reading to pressure (bar).
 const float INLET_PRESSURE_CONV = (INLET_SENSOR_RANGE * INLET_SENSOR_SCALE / MY_ADC_RESOLUTION);
 
-// Discharge Sensor
-const float DISCHARGE_SENSOR_SCALE = 1.0;
-const float DISCHARGE_SENSOR_RANGE = 10.0;  // 0 to 10 bar
-const float DISCHARGE_SENSOR_OFFSET = -0.08;
+// Discharge Pressure Sensor Configuration
+const float DISCHARGE_SENSOR_SCALE = 1.0;   // Scale factor for the discharge pressure sensor.
+const float DISCHARGE_SENSOR_RANGE = 10.0;  // Sensor measurement range (e.g., 0 to 10 bar).
+const float DISCHARGE_SENSOR_OFFSET = -0.08;// Offset value for the discharge pressure sensor.
+// Conversion factor: (Range * Scale) / ADC_Resolution. Used to convert ADC reading to pressure (bar).
 const float DISCHARGE_PRESSURE_CONV = (DISCHARGE_SENSOR_RANGE * DISCHARGE_SENSOR_SCALE / MY_ADC_RESOLUTION);
 
 // === Pin Definitions ===
-// ADC Pins
-const int inletAnalogPin = 0;      // GPIO26
-const int dischargeAnalogPin = 1;  // GPIO27
+// ADC Pins (Physical ADC channels on RP2040)
+const int inletAnalogPin = 0;      // ADC0, corresponds to GPIO26. For reading inlet pressure.
+const int dischargeAnalogPin = 1;  // ADC1, corresponds to GPIO27. For reading discharge pressure.
 
-// Inlet Motor Control Pins
-const int stepPinInlet = 4;
-const int dirPinInlet = 3;
-const int enaPinInlet = 2;
+// Inlet Motor Control Pins (GPIO pin numbers)
+const int stepPinInlet = 4;     // STEP pin for the inlet motor driver.
+const int dirPinInlet = 3;      // DIRECTION pin for the inlet motor driver.
+const int enaPinInlet = 2;      // ENABLE pin for the inlet motor driver. (LOW to enable, HIGH to disable)
 
-// Discharge Motor Control Pins
-const int stepPinDischarge = 8;
-const int dirPinDischarge = 7;
-const int enaPinDischarge = 6;
+// Discharge Motor Control Pins (GPIO pin numbers)
+const int stepPinDischarge = 8; // STEP pin for the discharge motor driver.
+const int dirPinDischarge = 7;  // DIRECTION pin for the discharge motor driver.
+const int enaPinDischarge = 6;  // ENABLE pin for the discharge motor driver. (LOW to enable, HIGH to disable)
 
-// Maximum steps (used for constructor)
-long maxStepsInlet = 32500; 
-long maxStepsDischarge = 35000;
+// Maximum steps for each motor (used in MotorController constructor).
+// These define the operational range of the motors in terms of steps.
+long maxStepsInlet = 32500;      // Maximum steps the inlet motor can take from its zero position.
+long maxStepsDischarge = 35000;  // Maximum steps the discharge motor can take from its zero position.
 
-// Step intervals (used for constructor)
-long intervalRunInlet = 200; 
-long initialIntervalInlet = 1000; 
-long intervalRunDischarge = 200;  
-long initialIntervalDischarge = 1000; 
+// Step intervals (microseconds) for motor speed control (used in MotorController constructor).
+long intervalRunInlet = 200;        // Target interval (µs) for inlet motor when running at speed (shorter = faster).
+long initialIntervalInlet = 1000;   // Initial interval (µs) for inlet motor at start of acceleration (longer = slower).
+long intervalRunDischarge = 200;    // Target interval (µs) for discharge motor at speed.
+long initialIntervalDischarge = 1000; // Initial interval (µs) for discharge motor at start of acceleration.
 
-// Acceleration (used for constructor)
-long accelerationStepsInlet = 2000; 
-long accelerationStepsDischarge = 1500; 
+// Acceleration parameters (number of steps over which to accelerate/decelerate) (used in MotorController constructor).
+long accelerationStepsInlet = 2000;     // Number of steps for inlet motor to reach full speed or stop.
+long accelerationStepsDischarge = 1500; // Number of steps for discharge motor to reach full speed or stop.
 
-const unsigned long timeoutDuration = 60000; // 60 seconds (Global, used by MotorController)
+// Timeout duration for pressure control operations (milliseconds).
+// If a motor tries to reach a set pressure and takes longer than this, it will time out.
+const unsigned long timeoutDuration = 60000; // 60 seconds.
 
 // Pressure Variables
-volatile float currentPressureInlet = 0.0;
-volatile float currentPressureDischarge = 0.0;
-float setPressureInlet = 0.0; 
-float setPressureDischarge = 0.0; 
+volatile float currentPressureInlet = 0.0;     // Current measured pressure for the inlet (bar). 'volatile' as it's updated by core1 and read by core0.
+volatile float currentPressureDischarge = 0.0; // Current measured pressure for the discharge (bar). 'volatile' for the same reason.
+float setPressureInlet = 0.0;                  // Target pressure for the inlet (bar), set via serial command.
+float setPressureDischarge = 0.0;              // Target pressure for the discharge (bar), set via serial command.
 
-// Tolerances and limits (some will be passed to MotorController)
-float pressureToleranceInlet = 0.02f; // Note: adding 'f' for float literal
-float pressureToleranceDischarge = 0.05f;
-float maxPressureInlet = 0.0f; 
-float minimumPressureInlet = -1.0f;
-float maxPressureDischarge = 7.0f;
-float minimumPressureDischarge = 0.2f; 
+// Tolerances and Limits for Pressure Control (some passed to MotorController)
+float pressureToleranceInlet = 0.02f;     // Allowed deviation (bar) from setPressureInlet to be considered "on target".
+float pressureToleranceDischarge = 0.05f; // Allowed deviation (bar) from setPressureDischarge.
+float maxPressureInlet = 0.0f;            // Maximum allowable pressure for inlet (currently 0.0, meaning inlet is for vacuum/negative pressure).
+float minimumPressureInlet = -1.0f;       // Minimum allowable pressure for inlet (e.g., -1.0 bar).
+float maxPressureDischarge = 7.0f;        // Maximum allowable pressure for discharge (e.g., 7.0 bar).
+float minimumPressureDischarge = 0.2f;    // Minimum pressure for discharge when resetting (acts as a reset threshold).
 
-const float PRESSURE_RESPONSE_RATE = 0.05f;  
+// Pressure simulation parameters (used in pressureSensorCore1)
+const float PRESSURE_RESPONSE_RATE = 0.05f; // How quickly the simulated pressure approaches the target pressure based on motor steps. (0 to 1)
+// Simulated pressure change per step for the inlet motor. Assumes linear relationship.
 const float INLET_PRESSURE_PER_STEP = minimumPressureInlet / maxStepsInlet; 
 
-// Global flags
-bool targetPressure = false; 
-bool targetDischargePressure = false;
-bool notifyInlet = false; 
-bool notifyDischarge = false;
-bool controlEnableInlet = true;
-bool controlEnableDischarge = true;
+// Global Flags for System State
+bool targetPressure = false;            // True if inlet motor has reached its target pressure.
+bool targetDischargePressure = false;   // True if discharge motor has reached its target pressure.
+bool notifyInlet = false;               // Flag to control notification messages for inlet pressure achievement. True = message sent.
+bool notifyDischarge = false;           // Flag to control notification messages for discharge pressure achievement. True = message sent.
+bool controlEnableInlet = true;         // Master enable/disable for inlet motor control logic.
+bool controlEnableDischarge = true;     // Master enable/disable for discharge motor control logic.
 
-// Global overshoot parameters (will be passed to MotorController constructor)
-int reverseStepsInlet = 20;
-float slowFactorInlet = 0.5f;
-int reverseStepsDischarge = 20;
-float slowFactorDischarge = 0.5f;
+// Global Overshoot Control Parameters (passed to MotorController constructor)
+// These help manage and correct if the motor moves the pressure beyond the setpoint.
+int reverseStepsInlet = 20;         // Number of steps to reverse inlet motor if overshoot is detected.
+float slowFactorInlet = 0.5f;       // Factor to slow down inlet motor during overshoot recovery (e.g., 0.5 = half speed).
+int reverseStepsDischarge = 20;     // Number of steps to reverse discharge motor if overshoot is detected.
+float slowFactorDischarge = 0.5f;   // Factor to slow down discharge motor during overshoot recovery.
 
-// === Circular Buffer ===
-const int arraySize = 20;
-int avgSampTime = 1000000 / arraySize;  
+// === Circular Buffer Configuration ===
+// Used for averaging sensor readings to smooth out noise.
+const int arraySize = 20;                   // Number of samples to store in the circular buffer.
+int avgSampTime = 1000000 / arraySize;      // Target sampling time (µs) per sample to fill the buffer over 1 second.
 
 // === Serial Communication ===
-const byte numChars = 16;
-char receivedChars[numChars];
-boolean newData = false;
-String serialStr;
-bool streamPressure = false;
-unsigned long lastStreamTime = 0;
-const unsigned long streamInterval = 1000;  
+const byte numChars = 16;               // Maximum number of characters expected in a serial command.
+char receivedChars[numChars];           // Array to store incoming serial characters.
+boolean newData = false;                // Flag that becomes true when a complete new serial command is received (newline terminated).
+String serialStr;                       // String object to process received serial commands.
+bool streamPressure = false;            // Flag to enable/disable continuous streaming of pressure data via serial.
+unsigned long lastStreamTime = 0;       // Timestamp of the last pressure data stream.
+const unsigned long streamInterval = 1000; // Interval (ms) for streaming pressure data. (1 second)
 
+// Structure definition for a circular buffer.
+// Used to store recent sensor readings and calculate their average.
 struct CircularBuffer {
-  int buffer[arraySize];
-  int start = 0;
-  int count = 0;
+  int buffer[arraySize]; // Array to store buffer elements (scaled by 100, as integers).
+  int start = 0;         // Index of the oldest element in the buffer.
+  int count = 0;         // Number of elements currently in the buffer.
+
+  // Adds a new value to the buffer. If the buffer is full, the oldest value is overwritten.
   void push(int value) {
-    int idx = (start + count) % arraySize;
+    int idx = (start + count) % arraySize; // Calculate index for the new value.
     buffer[idx] = value;
     if (count < arraySize) {
-      count++;
+      count++; // Increment count if buffer is not yet full.
     } else {
-      start = (start + 1) % arraySize;
+      start = (start + 1) % arraySize; // Otherwise, overwrite oldest, so advance start index.
     }
   }
+
+  // Calculates the average of the values currently in the buffer.
   float average() {
-    if (count == 0) return 0;
+    if (count == 0) return 0; // Avoid division by zero if buffer is empty.
     float sum = 0;
     for (int i = 0; i < count; i++) {
       sum += buffer[(start + i) % arraySize];
@@ -124,44 +143,66 @@ struct CircularBuffer {
     return sum / count;
   }
 };
-CircularBuffer dischargeFilo;      
-CircularBuffer inletFilo;          
-CircularBuffer flowFilo;           
-volatile float currentFlow = 0.0;  
 
+// Instances of CircularBuffer for sensor data smoothing.
+CircularBuffer dischargeFilo;      // Buffer for discharge pressure readings.
+CircularBuffer inletFilo;          // Buffer for inlet pressure readings.
+CircularBuffer flowFilo;           // Buffer for simulated flow readings.
+volatile float currentFlow = 0.0;  // Smoothed flow rate, calculated from averages. 'volatile' as it's updated by core1.
+
+// Class to manage individual stepper motor control.
 class MotorController {
 public:
-    int _stepPin;
-    int _dirPin;
-    int _enaPin;
-    long _maxSteps;
-    long _initialInterval;
-    long _runInterval;
-    long _accelerationSteps;
-    bool _motorDirectionSetting; 
-    volatile float& _currentPressureRef; 
-    float& _setPressureRef;          
-    bool& _controlEnableRef;         
-    bool& _notifyFlagRef;            
-    float _minPressureForReset;   
-    String _name;                 
-    long _stepCount;
-    long _stepCountAcc;
-    bool _previousDirection;
-    unsigned long _motorLastStepTime;
-    long _currentInterval; 
-    float _slowdownPressureThreshold1;
-    float _slowdownFactor1;
-    float _slowdownPressureThreshold2; 
-    float _slowdownFactor2;   
-    unsigned long _pressureControlStartTime;
-    bool _timedOut;
-    // Overshoot control members
-    int _overshootReverseSteps;
-    float _overshootSlowFactor;
-    bool _isRecoveringOvershoot;
-    float _pressureTolerance;
+    // --- Pin Configuration ---
+    int _stepPin; // GPIO pin for STEP signal.
+    int _dirPin;  // GPIO pin for DIRECTION signal.
+    int _enaPin;  // GPIO pin for ENABLE signal.
 
+    // --- Motor & Movement Parameters ---
+    long _maxSteps;             // Maximum steps motor can travel from zero.
+    long _initialInterval;      // Starting step interval (µs) for acceleration.
+    long _runInterval;          // Target step interval (µs) at desired speed.
+    long _accelerationSteps;    // Number of steps for acceleration/deceleration ramp.
+
+    // Defines motor's physical direction relative to logical direction (true/false for stepMotor).
+    // If true, `setDirection(true)` might mean DIR pin HIGH, `setDirection(false)` means DIR pin LOW.
+    // If false, `setDirection(true)` might mean DIR pin LOW, `setDirection(false)` means DIR pin HIGH.
+    // This adapts to how the motor is wired or its default rotation.
+    // Step count always increases for 'forward' (true) and decreases for 'backward' (false).
+    bool _motorDirectionSetting; 
+
+    // --- Pressure Control References & State ---
+    volatile float& _currentPressureRef; // Reference to global variable holding current pressure for this motor.
+    float& _setPressureRef;              // Reference to global variable holding target pressure for this motor.
+    bool& _controlEnableRef;             // Reference to global flag enabling/disabling this motor's control.
+    bool& _notifyFlagRef;                // Reference to global flag for target achieved notification.
+    float _minPressureForReset;          // Pressure threshold that indicates motor is reset (e.g., at zero steps).
+    String _name;                        // Name of the motor (e.g., "Inlet", "Discharge") for logging.
+
+    // --- Internal State Variables ---
+    long _stepCount;                     // Current position of the motor in steps from zero.
+    long _stepCountAcc;                  // Accumulator for steps taken during current acceleration/deceleration phase.
+    bool _previousDirection;             // Last logical direction motor moved (true=forward, false=backward).
+    unsigned long _motorLastStepTime;    // Timestamp (µs) of the last step taken.
+    long _currentInterval;               // Current step interval (µs), dynamically adjusted for acc/dec.
+
+    // --- Speed Slowdown Parameters (approaching target) ---
+    float _slowdownPressureThreshold1; // Pressure difference threshold to start first slowdown.
+    float _slowdownFactor1;            // Factor to multiply _runInterval by for first slowdown.
+    float _slowdownPressureThreshold2; // Pressure difference threshold to start second (more significant) slowdown.
+    float _slowdownFactor2;            // Factor for second slowdown. (-1.0f for threshold2 disables it)
+
+    // --- Timeout Control ---
+    unsigned long _pressureControlStartTime; // Timestamp (ms) when current pressure control operation started.
+    bool _timedOut;                          // Flag: true if pressure control has timed out.
+
+    // --- Overshoot Control Members ---
+    int _overshootReverseSteps;     // Number of steps to reverse if an overshoot is detected.
+    float _overshootSlowFactor;     // Speed reduction factor during overshoot recovery.
+    bool _isRecoveringOvershoot;    // Flag: true if currently recovering from an overshoot.
+    float _pressureTolerance;       // Pressure tolerance for detecting overshoot and confirming recovery.
+
+    // Constructor for MotorController
     MotorController(int stepPin, int dirPin, int enaPin,
                     long maxSteps, long initialInterval, long runInterval, long accelerationSteps,
                     bool motorDirectionSetting,
@@ -171,9 +212,7 @@ public:
                     float slowdownPressureThreshold1, float slowdownFactor1,
                     float slowdownPressureThreshold2, float slowdownFactor2,
                     String name,
-                    int overshootReverseSteps,
-                    float overshootSlowFactor,
-                    float pressureToleranceVal) 
+                    int overshootReverseSteps, float overshootSlowFactor, float pressureToleranceVal)
         : _stepPin(stepPin), _dirPin(dirPin), _enaPin(enaPin),
           _maxSteps(maxSteps), _initialInterval(initialInterval), _runInterval(runInterval), _accelerationSteps(accelerationSteps),
           _motorDirectionSetting(motorDirectionSetting),
@@ -184,125 +223,218 @@ public:
           _slowdownPressureThreshold2(slowdownPressureThreshold2), _slowdownFactor2(slowdownFactor2),
           _name(name),
           _overshootReverseSteps(overshootReverseSteps), _overshootSlowFactor(overshootSlowFactor),
-          _pressureTolerance(pressureToleranceVal), _isRecoveringOvershoot(false)
+          _pressureTolerance(pressureToleranceVal), _isRecoveringOvershoot(false) // Initialize members
     {
-        _stepCount = 0;
-        _stepCountAcc = 0;
-        _previousDirection = true; 
-        _motorLastStepTime = 0;
-        _currentInterval = _initialInterval; 
-        _pressureControlStartTime = 0; 
-        _timedOut = false;             
+        // Initialize internal state
+        _stepCount = 0;                  // Start at zero steps.
+        _stepCountAcc = 0;               // Reset acceleration step count.
+        _previousDirection = true;       // Default previous direction.
+        _motorLastStepTime = 0;          // Initialize last step time.
+        _currentInterval = _initialInterval; // Start with initial (slower) interval.
+        _pressureControlStartTime = 0;   // No timeout active initially.
+        _timedOut = false;               // Not timed out.
+
+        // Configure GPIO pins for motor control
         pinMode(_stepPin, OUTPUT);
         pinMode(_dirPin, OUTPUT);
         pinMode(_enaPin, OUTPUT);
-        digitalWrite(_stepPin, LOW);
-        digitalWrite(_enaPin, HIGH); 
+        digitalWrite(_stepPin, LOW);    // Ensure step pin is initially low.
+        digitalWrite(_enaPin, HIGH);    // Disable motor driver initially (HIGH = disabled for TB6600).
     }
 
-    void setDirection(bool direction) {
-        if (_motorDirectionSetting) { digitalWrite(_dirPin, !direction); } 
-        else { digitalWrite(_dirPin, direction); }
-        if (direction != _previousDirection) { _stepCountAcc = 0; _previousDirection = direction; }
+    // Sets the motor direction pin based on the logical direction and _motorDirectionSetting.
+    // Also resets acceleration step count if direction changes.
+    void setDirection(bool direction) { // true for forward/increasing steps, false for backward/decreasing steps
+        if (_motorDirectionSetting) {
+            digitalWrite(_dirPin, !direction); // Inverted if _motorDirectionSetting is true
+        } else {
+            digitalWrite(_dirPin, direction);  // Normal if _motorDirectionSetting is false
+        }
+        // If logical direction changes, reset acceleration ramp.
+        if (direction != _previousDirection) {
+            _stepCountAcc = 0;
+            _previousDirection = direction;
+        }
     }
-    void enableMotor(bool enable) { digitalWrite(_enaPin, enable ? LOW : HIGH); }
+
+    // Enables or disables the motor driver.
+    void enableMotor(bool enable) {
+        digitalWrite(_enaPin, enable ? LOW : HIGH); // LOW enables TB6600, HIGH disables.
+    }
+
+    // Returns true if motor control is currently enabled.
     bool isControlEnabled() { return _controlEnableRef; }
+
+    // Sets the motor control enable flag.
     void setControlEnable(bool enable) { _controlEnableRef = enable; }
+
+    // Returns the current step count of the motor.
     long getStepCount() { return _stepCount; }
+
+    // Returns the maximum allowed steps for the motor.
     long getMaxSteps() { return _maxSteps; }
+
+    // Sets the notification flag (e.g., when target pressure is achieved).
     void setNotifyFlag(bool val) { _notifyFlagRef = val; }
+
+    // Gets the current state of the notification flag.
     bool getNotifyFlag() { return _notifyFlagRef; }
 
+    // Returns true if the motor is currently in overshoot recovery mode.
+    bool isRecoveringOvershoot() const { return _isRecoveringOvershoot; }
+
+    // Calculates the appropriate step interval for acceleration, deceleration, and slowdowns.
     void calculateInterval() {
-        if (_isRecoveringOvershoot) { // Check if recovering from overshoot first
+        // If recovering from overshoot, use a fixed slow interval.
+        if (_isRecoveringOvershoot) {
             _currentInterval = (unsigned long)(_runInterval / _overshootSlowFactor);
-            if (_currentInterval == 0) _currentInterval = 1; // Prevent issues
-            return; // Skip normal accel/decel logic
+            if (_currentInterval == 0) _currentInterval = 1; // Prevent division by zero or too fast.
+            return; // Skip normal acceleration/deceleration logic.
         }
-        float error = fabs(_currentPressureRef - _setPressureRef);
+
+        float error = fabs(_currentPressureRef - _setPressureRef); // Absolute difference to target.
+
+        // Acceleration phase: Linearly decrease interval from _initialInterval to _runInterval.
         if (_stepCountAcc < _accelerationSteps) {
             float progress = (float)_stepCountAcc / _accelerationSteps;
             _currentInterval = _initialInterval - (progress * (_initialInterval - _runInterval));
             _stepCountAcc++;
         } else { 
+            // Constant speed phase (or deceleration handled by slowdown).
              _currentInterval = _runInterval;
         }
-        if (_setPressureRef != 0) { 
+
+        // Slowdown phase: If close to setpoint, increase interval (slow down).
+        if (_setPressureRef != 0) { // Only apply slowdown if there's a target.
+            // Check second (more aggressive) slowdown threshold first.
             if (_slowdownPressureThreshold2 != -1.0f && error < _slowdownPressureThreshold2) { 
-                 _currentInterval = _runInterval * _slowdownFactor2;
-            } else if (error < _slowdownPressureThreshold1) {
+                 _currentInterval = _runInterval * _slowdownFactor2; // Larger interval = slower.
+            }
+            // Check first slowdown threshold.
+            else if (error < _slowdownPressureThreshold1) {
                  _currentInterval = _runInterval * _slowdownFactor1;
             }
         }
+        // Ensure interval is not zero or negative.
         if (_currentInterval <= 0) { _currentInterval = _runInterval; }
     }
 
+    // Executes a single motor step if conditions are met.
+    // `direction`: true for forward (increment step count), false for backward (decrement).
     void stepMotor(bool direction) {
-        if (!_controlEnableRef) return; 
+        if (!_controlEnableRef) return; // Do nothing if motor control is disabled.
+
+        // Check if enough time has passed since the last step, based on current interval.
         if ((int32_t)micros() - _motorLastStepTime < _currentInterval) { return; }
-        setDirection(direction);
-        calculateInterval(); 
-        digitalWrite(_stepPin, HIGH); delayMicroseconds(5); digitalWrite(_stepPin, LOW);
-        _motorLastStepTime = micros(); 
-        _stepCount += direction ? 1 : -1;
-        if (_notifyFlagRef == true && _name != "") { // Check name to prevent empty prints if name is not set
+
+        setDirection(direction);    // Set motor direction.
+        calculateInterval();        // Update _currentInterval for next step (accel/decel).
+
+        // Perform step: pulse STEP pin.
+        digitalWrite(_stepPin, HIGH);
+        delayMicroseconds(5); // Brief delay to ensure driver registers the pulse.
+        digitalWrite(_stepPin, LOW);
+
+        _motorLastStepTime = micros(); // Record time of this step.
+        _stepCount += direction ? 1 : -1; // Update step count based on direction.
+
+        // Optional: Notify that motor is adjusting (can be verbose).
+        if (_notifyFlagRef == true && _name != "") {
             Serial.print(_name); Serial.println(" adjusting...");
-            // _notifyFlagRef = false; // Let managePressure or serialInput handle this based on overall target
+            // _notifyFlagRef = false; // Typically reset by higher-level logic once target is confirmed.
         }
     }
 
+    // Resets the motor to its zero position or a defined reset pressure.
+    // Returns true if reset was successful, false on timeout.
     bool resetMotor() { 
-        enableMotor(true); setControlEnable(true); 
+        enableMotor(true);          // Ensure motor is enabled for movement.
+        setControlEnable(true);     // Ensure control logic is active.
         Serial.print(_name); Serial.println(" motor resetting...");
-        unsigned long resetOpStartTime = millis(); 
-        const unsigned long resetOperationTimeout = 30000; 
+        unsigned long resetOpStartTime = millis(); // Timeout for reset operation.
+        const unsigned long resetOperationTimeout = 30000; // 30 seconds for reset.
+
         while (millis() - resetOpStartTime < resetOperationTimeout) {
+            // Condition for successful reset (e.g., pressure at or below a minimum).
             bool conditionMet = (_currentPressureRef <= _minPressureForReset);
             if (conditionMet) {
-                _stepCount = 0; _stepCountAcc = 0; _setPressureRef = 0; 
+                _stepCount = 0; _stepCountAcc = 0; _setPressureRef = 0; // Reset state variables.
                 Serial.print(_name); Serial.println(" reset complete (pressure condition met).");
                 return true; 
             }
+
+            // Step motor backwards slowly until conditionMet or timeout.
+            // Uses a fixed slow interval for reset.
             if ((int32_t)micros() - _motorLastStepTime >= (_initialInterval > 500 ? 500 : _initialInterval)) {
-                setDirection(false); 
-                _currentInterval = _initialInterval > 500 ? 500 : _initialInterval; 
+                setDirection(false); // Move backward.
+                _currentInterval = _initialInterval > 500 ? 500 : _initialInterval; // Fixed slow speed.
                 digitalWrite(_stepPin, HIGH); delayMicroseconds(5); digitalWrite(_stepPin, LOW);
-                _motorLastStepTime = micros(); _stepCount += -1; 
+                _motorLastStepTime = micros();
+                _stepCount += -1; // Decrement step count.
             }
         }
         Serial.print(_name); Serial.println(" motor reset timeout!");
-        enableMotor(false); return false; 
+        enableMotor(false); // Disable motor on timeout.
+        return false;
     }
     
+    // Returns the timestamp (µs) of the last motor step.
     unsigned long getLastStepTime() { return _motorLastStepTime; }
+
+    // Returns the current step interval (µs).
     long getCurrentInterval() { return _currentInterval; }
 
+    // Resets the pressure control timeout timer.
+    // Called when a new set pressure is received.
     void resetTimeout(float newSetPressure) {
-        if (newSetPressure != 0) { _pressureControlStartTime = millis(); _timedOut = false; } 
-        else { _pressureControlStartTime = 0; _timedOut = false; }
+        if (newSetPressure != 0) { // If there's a non-zero target, start timeout timer.
+            _pressureControlStartTime = millis();
+            _timedOut = false;
+        } else { // If target is zero, effectively no timeout needed for "holding" at zero.
+            _pressureControlStartTime = 0;
+            _timedOut = false;
+        }
     }
     
+    // Main pressure management function for the motor.
+    // `targetPressureFlag`: true if the desired pressure has been reached and should be maintained.
+    // `globalResetFlag`: true if a global system reset is requested.
     void managePressure(bool targetPressureFlag, bool globalResetFlag) {
+        // If motor has timed out, keep it disabled and do nothing.
         if (_timedOut) {
             enableMotor(false); return;
         }
+
+        // Handle global reset command.
         if (globalResetFlag) {
             if (resetMotor()) { /* Individual motor reset successful. */ }
+            // `reset` flag in main loop will be cleared if all motors reset successfully.
             return; 
         }
+
+        // Enable motor if not yet at target pressure, disable if at target.
+        // This allows the motor to hold position by being disabled once target is met.
         enableMotor(!targetPressureFlag); 
+
+        // Check for timeout if motor is active and trying to reach a non-zero setpoint.
         if (!targetPressureFlag && _setPressureRef != 0 && isControlEnabled()) {
              if (_pressureControlStartTime != 0 && millis() - _pressureControlStartTime > timeoutDuration) { 
                 Serial.print(_name); Serial.println(" motor pressure control timeout!");
-                _timedOut = true; setControlEnable(false); enableMotor(false);    
+                _timedOut = true;       // Set timeout flag.
+                setControlEnable(false);// Disable control.
+                enableMotor(false);     // Disable motor hardware.
                 return; 
             }
         }
+
+        // If motor control is disabled or target pressure is already achieved, do nothing further.
         if (!isControlEnabled() || targetPressureFlag) { return; }
         
-        // Overshoot Logic (before normal stepping logic if not recovering)
-        if (!_isRecoveringOvershoot) {
+        // --- Overshoot Detection and Recovery Logic ---
+        if (!_isRecoveringOvershoot) { // If not already recovering...
             bool overshootDetected = false;
+            // Detect overshoot: current pressure is beyond setpoint + tolerance.
+            // Handles both positive and negative setpoints.
             if ((_setPressureRef > 0 && _currentPressureRef > _setPressureRef + _pressureTolerance) ||
                 (_setPressureRef < 0 && _currentPressureRef < _setPressureRef - _pressureTolerance)) {
                 overshootDetected = true;
@@ -310,93 +442,171 @@ public:
 
             if (overshootDetected) {
                 Serial.print(_name); Serial.println(" overshoot detected!");
-                _isRecoveringOvershoot = true;
-                // Determine actual pin state for reverse. _previousDirection true means last step was 'forward'
-                bool reverseDirForPin = _previousDirection ? !_motorDirectionSetting : _motorDirectionSetting; // Corrected logic
-                digitalWrite(_dirPin, reverseDirForPin); // Set reverse direction
-                
-                for (int i = 0; i < _overshootReverseSteps; i++) {
-                    if(!isControlEnabled()) break; 
-                    digitalWrite(_stepPin, HIGH); delayMicroseconds(200); 
-                    digitalWrite(_stepPin, LOW); delayMicroseconds(200);
-                    // Not updating _stepCount here for simplicity of recovery.
-                }
-                // After reversing, the next call to managePressure will enter the recovery state below.
-                _motorLastStepTime = micros(); // Update last step time to allow recovery step soon
-                return; 
-            }
-        } else { // _isRecoveringOvershoot is true
-            bool directionToSetPoint = (_currentPressureRef < _setPressureRef);
-            // calculateInterval will use the slow factor because _isRecoveringOvershoot is true
-            stepMotor(directionToSetPoint); // stepMotor also calls calculateInterval which is now overshoot-aware
+                _isRecoveringOvershoot = true; // Enter recovery mode.
 
+                // Determine the physical direction pin state for reverse.
+                // This depends on _motorDirectionSetting and the last logical direction (_previousDirection).
+                bool reverseDirForPin = _previousDirection ? !_motorDirectionSetting : _motorDirectionSetting;
+                digitalWrite(_dirPin, reverseDirForPin); // Set DIR pin for reverse.
+                
+                // Execute a fixed number of reverse steps at a fixed (fast) speed.
+                for (int i = 0; i < _overshootReverseSteps; i++) {
+                    if(!isControlEnabled()) break; // Stop if control is disabled during this.
+                    digitalWrite(_stepPin, HIGH); delayMicroseconds(200); // Quick steps.
+                    digitalWrite(_stepPin, LOW); delayMicroseconds(200);
+                    // Note: _stepCount is not updated here to simplify recovery logic.
+                    // The goal is to quickly move back, then let normal control resume slowly.
+                }
+                _motorLastStepTime = micros(); // Update last step time to allow recovery step soon.
+                return; // Exit managePressure for this cycle; recovery will proceed in next call.
+            }
+        } else { // --- Actively Recovering from Overshoot ---
+            // Determine logical direction towards the setpoint.
+            bool directionToSetPoint = (_currentPressureRef < _setPressureRef);
+
+            // `calculateInterval` will use `_overshootSlowFactor` because `_isRecoveringOvershoot` is true.
+            stepMotor(directionToSetPoint);
+
+            // Check if overshoot recovery is complete (pressure is within half tolerance of setpoint).
             if (fabs(_currentPressureRef - _setPressureRef) <= (_pressureTolerance / 2.0f)) {
                 Serial.print(_name); Serial.println(" overshoot recovery complete.");
-                _isRecoveringOvershoot = false;
+                _isRecoveringOvershoot = false; // Exit recovery mode.
             }
-            return; // Return after a recovery step attempt
+            return; // Exit managePressure; continue recovery or normal operation in next call.
         }
 
-        // Normal stepping logic (if no overshoot detected and not recovering)
-        if (_setPressureRef != 0 && _stepCount > 0 && ((_currentPressureRef > _setPressureRef && _setPressureRef > 0) || (_currentPressureRef < _setPressureRef && _setPressureRef < 0))) {
-            stepMotor(false); 
-        } else if (_setPressureRef != 0 && _stepCount < _maxSteps && ((_currentPressureRef < _setPressureRef && _setPressureRef > 0) || (_currentPressureRef > _setPressureRef && _setPressureRef < 0))) {
-            stepMotor(true);  
-        } else if (_stepCount >= _maxSteps && _setPressureRef != 0) {
-            setControlEnable(false);  
-            Serial.print(_name); Serial.println(" motor at maximum step count. Motor disabled, reset pressure to '0' and then 'start' to enable.");
-        } else if (_setPressureRef == 0 && _stepCount > 0) {
-            stepMotor(false);  
+        // --- Normal Stepping Logic (if no overshoot detected and not recovering) ---
+        // This logic decides whether to step forward, backward, or do nothing based on current vs. set pressure.
+
+        // Condition to step backward (decrease pressure / decrease steps):
+        // - Setpoint is non-zero.
+        // - Motor is not at zero steps already.
+        // - Current pressure is above setpoint (for positive setpoints) OR below setpoint (for negative setpoints).
+        if (_setPressureRef != 0 && _stepCount > 0 &&
+            ((_currentPressureRef > _setPressureRef && _setPressureRef > 0) || (_currentPressureRef < _setPressureRef && _setPressureRef < 0))) {
+            stepMotor(false); // Step backward.
         }
+        // Condition to step forward (increase pressure / increase steps):
+        // - Setpoint is non-zero.
+        // - Motor is not at max steps already.
+        // - Current pressure is below setpoint (for positive setpoints) OR above setpoint (for negative setpoints).
+        else if (_setPressureRef != 0 && _stepCount < _maxSteps &&
+                   ((_currentPressureRef < _setPressureRef && _setPressureRef > 0) || (_currentPressureRef > _setPressureRef && _setPressureRef < 0))) {
+            stepMotor(true);  // Step forward.
+        }
+        // Condition: At maximum steps but not at target pressure.
+        else if (_stepCount >= _maxSteps && _setPressureRef != 0) {
+            setControlEnable(false);  // Disable motor to prevent further movement.
+            Serial.print(_name); Serial.println(" motor at maximum step count. Motor disabled, reset pressure to '0' and then 'start' to enable.");
+        }
+        // Condition: Setpoint is zero, and motor is not yet at zero steps.
+        else if (_setPressureRef == 0 && _stepCount > 0) {
+            stepMotor(false); // Step backward towards zero.
+        }
+        // If none of the above, motor holds position (or is handled by targetPressureFlag logic at the start).
     }
 };
 
+// === MotorController Object Instantiation ===
 MotorController inletMotor(
-    stepPinInlet, dirPinInlet, enaPinInlet, maxStepsInlet, initialIntervalInlet, intervalRunInlet, accelerationStepsInlet, true, 
-    currentPressureInlet, setPressureInlet, controlEnableInlet, notifyInlet, maxPressureInlet, 
-    0.2f, 16.0f, 0.15f, 40.0f, "Inlet",
-    reverseStepsInlet, slowFactorInlet, pressureToleranceInlet
+    stepPinInlet, dirPinInlet, enaPinInlet, // Pin definitions
+    maxStepsInlet, initialIntervalInlet, intervalRunInlet, accelerationStepsInlet, // Movement parameters
+    true, // _motorDirectionSetting: true = DIR pin is inverted relative to logical 'forward'
+    currentPressureInlet, setPressureInlet, controlEnableInlet, notifyInlet, // References to global vars
+    maxPressureInlet, // _minPressureForReset (using maxPressureInlet for inlet, as it's usually 0 or negative)
+    0.2f, 16.0f, 0.15f, 40.0f, // Slowdown thresholds and factors
+    "Inlet", // Name
+    reverseStepsInlet, slowFactorInlet, pressureToleranceInlet // Overshoot parameters
 );
 
 MotorController dischargeMotor(
-    stepPinDischarge, dirPinDischarge, enaPinDischarge, maxStepsDischarge, initialIntervalDischarge, intervalRunDischarge, accelerationStepsDischarge, true, 
-    currentPressureDischarge, setPressureDischarge, controlEnableDischarge, notifyDischarge, minimumPressureDischarge, 
-    0.2f, 4.0f, 0.0f, 1.0f, "Discharge", // Using 1.0f for factor2 if threshold2 is 0.0f
-    reverseStepsDischarge, slowFactorDischarge, pressureToleranceDischarge
+    stepPinDischarge, dirPinDischarge, enaPinDischarge, // Pin definitions
+    maxStepsDischarge, initialIntervalDischarge, intervalRunDischarge, accelerationStepsDischarge, // Movement parameters
+    true, // _motorDirectionSetting
+    currentPressureDischarge, setPressureDischarge, controlEnableDischarge, notifyDischarge, // References
+    minimumPressureDischarge, // _minPressureForReset (discharge resets to a minimum positive pressure)
+    0.2f, 4.0f, 0.0f, 1.0f, // Slowdown: Threshold2 is 0.0f, Factor2 is 1.0f (effectively one slowdown stage)
+    "Discharge", // Name
+    reverseStepsDischarge, slowFactorDischarge, pressureToleranceDischarge // Overshoot parameters
 );
 
+// Forward declaration for the function running on core1.
 void pressureSensorCore1();
+
+// --- Arduino Setup Function ---
+// Initializes serial communication, launches core1, and prints welcome messages.
+// Core0 will run setup() and then loop().
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(115200); // Initialize serial communication at 115200 baud.
+
+  // Launch the pressureSensorCore1 function on the second core (core1).
+  // Core1 will independently run pressureSensorCore1 in a loop.
   multicore_launch_core1(pressureSensorCore1);
-  while (!Serial);
+
+  while (!Serial); // Wait for Serial port to be ready (optional, good for some boards).
+
   Serial.println("Inlet and Discharge Pressure Control Software Version 0.05 (MotorController Refactor)");
   Serial.println("Enter 'help' to list available serial commands");
 }
 
+// --- Arduino Main Loop Function (Core0) ---
+// Handles serial input, manages motor target achievement logic, and calls motor management functions.
 void loop() {
-  serial();
-  if (!reset && setPressureInlet < 0 && fabs(currentPressureInlet - setPressureInlet) <= pressureToleranceInlet) {
-      targetPressure = true;
-      if (!inletMotor.getNotifyFlag()) { 
-          Serial.printf("Inlet target pressure %.2f bar achieved\n", currentPressureInlet);
-          inletMotor.setNotifyFlag(true);
+  serial(); // Check for and process incoming serial commands.
+
+  // --- Inlet Motor Target Logic ---
+  bool inletTargetAchieved = false; // Local flag for current loop iteration.
+  if (!reset) { // Only check for target if system is not in reset mode.
+      // Case 1: Negative set pressure (typical for vacuum/inlet).
+      if (setPressureInlet < 0) {
+          // Target achieved if current pressure is within tolerance AND not currently recovering from an overshoot.
+          if (fabs(currentPressureInlet - setPressureInlet) <= pressureToleranceInlet && !inletMotor.isRecoveringOvershoot()) {
+              inletTargetAchieved = true;
+              if (!inletMotor.getNotifyFlag()) { // If notification not yet sent...
+                  Serial.printf("Inlet target pressure %.2f bar achieved\n", currentPressureInlet);
+                  inletMotor.setNotifyFlag(true); // Mark notification as sent.
+              }
+          }
       }
-  } else if (setPressureInlet == 0 && fabs(currentPressureInlet) <= pressureToleranceInlet && inletMotor.getStepCount() == 0 && !reset) { 
-      targetPressure = true;
-      if (!inletMotor.getNotifyFlag()) {
-          Serial.println("Inlet zero position achieved");
-          inletMotor.setNotifyFlag(true);
+      // Case 2: Zero set pressure (return to zero/home).
+      else if (setPressureInlet == 0) {
+          // Target achieved if pressure is near zero AND step count is zero.
+          // Overshoot recovery state is less critical here, focus is on reaching physical zero.
+          if (fabs(currentPressureInlet) <= pressureToleranceInlet && inletMotor.getStepCount() == 0) {
+              inletTargetAchieved = true;
+              if (!inletMotor.getNotifyFlag()) {
+                  Serial.println("Inlet zero position achieved");
+                  inletMotor.setNotifyFlag(true);
+              }
+          }
       }
-  } else if (setPressureInlet != 0 && fabs(currentPressureInlet - setPressureInlet) <= pressureToleranceInlet && !reset) { 
-      targetPressure = true;
-      if (!inletMotor.getNotifyFlag()) {
-          Serial.printf("Inlet target pressure %.2f bar achieved\n", currentPressureInlet);
-          inletMotor.setNotifyFlag(true);
+      // Case 3: Positive set pressure (less common for inlet, but handled).
+      else { // This implies setPressureInlet > 0
+          if (fabs(currentPressureInlet - setPressureInlet) <= pressureToleranceInlet && !inletMotor.isRecoveringOvershoot()) {
+              inletTargetAchieved = true;
+              if (!inletMotor.getNotifyFlag()) {
+                  Serial.printf("Inlet target pressure %.2f bar achieved\n", currentPressureInlet);
+                  inletMotor.setNotifyFlag(true);
+              }
+          }
       }
-  } else { targetPressure = false; }
+  }
+
+  targetPressure = inletTargetAchieved; // Update global flag used by inletMotor.managePressure().
+
+  // If target was not achieved (or was achieved then lost), reset the notification flag.
+  // This allows the "achieved" message to trigger again if pressure re-enters tolerance.
+  if (!targetPressure && inletMotor.getNotifyFlag()) {
+      inletMotor.setNotifyFlag(false);
+      // Serial.println("Inlet target pressure lost or not yet achieved."); // Optional debug line
+  }
+  // End of new logic for inlet targetPressure determination
+
+  // Call the inlet motor's pressure management function.
+  // Passes whether target is achieved and current global reset state.
   inletMotor.managePressure(targetPressure, reset);
 
+  // --- Discharge Motor Target Logic --- (Similar structure to inlet)
   if (!reset && fabs(currentPressureDischarge - setPressureDischarge) <= pressureToleranceDischarge && setPressureDischarge !=0) { 
       targetDischargePressure = true;
       if (!dischargeMotor.getNotifyFlag()) {
@@ -409,70 +619,166 @@ void loop() {
           Serial.println("Discharge zero position achieved");
           dischargeMotor.setNotifyFlag(true);
       }
-  } else { targetDischargePressure = false; }
+  } else {
+      targetDischargePressure = false;
+      if(dischargeMotor.getNotifyFlag()){ // If target lost, reset notify flag
+          dischargeMotor.setNotifyFlag(false);
+          // Serial.println("Discharge target pressure lost or not yet achieved."); // Optional debug
+      }
+  }
+  // Call the discharge motor's pressure management function.
   dischargeMotor.managePressure(targetDischargePressure, reset);
 
+  // --- Pressure Data Streaming ---
+  // If streaming is enabled and interval has passed, print pressure data.
   if (streamPressure && millis() - lastStreamTime >= streamInterval) {
-    lastStreamTime = millis();
+    lastStreamTime = millis(); // Reset stream timer.
+    // Print data from circular buffers (which are updated by core1).
     printBuffer(inletFilo, "Inlet", true);
     printBuffer(dischargeFilo, "Discharge", false);
     printBuffer(flowFilo, "Flow", false);
-    delay(10);
+    delay(10); // Small delay to allow serial buffer to flush.
   }
 }
 
+// --- Flow Sensor Simulation Function --- (Core1)
+// Simulates a flow sensor reading based on current inlet and discharge pressures.
+// This is a placeholder for a real sensor or more complex model.
 float simulateFlowSensor(float inletPressure, float dischargePressure) {
-  const float BASE_FLOW = 1.5f; const float k_discharge = 0.0714f; const float k_inlet = 2.0f;        
+  const float BASE_FLOW = 1.5f;         // Base flow rate if pressures were ideal.
+  const float k_discharge = 0.0714f;    // Factor for discharge pressure influence on flow.
+  const float k_inlet = 2.0f;           // Factor for inlet pressure influence on flow.
   float flow = BASE_FLOW - k_discharge * dischargePressure + k_inlet * inletPressure;
-  if (flow < 0) flow = 0; return flow;
+  if (flow < 0) flow = 0; // Flow cannot be negative.
+  return flow;
 }
+
+// --- Pressure Sensor Simulation Core (Core1) ---
+// This function runs on the RP2040's second core.
+// It simulates pressure changes based on motor step counts and updates global pressure variables.
+// It also populates circular buffers for averaging.
 void pressureSensorCore1() {
-  while (true) {
+  while (true) { // Continuous loop on core1.
+    // Simulate Inlet Pressure:
+    // Target pressure based on motor steps (linear relationship).
     float targetPressureInletSim = inletMotor.getStepCount() * INLET_PRESSURE_PER_STEP;
+    // Gradually move current pressure towards simulated target (simple low-pass filter).
     currentPressureInlet += (targetPressureInletSim - currentPressureInlet) * PRESSURE_RESPONSE_RATE;
+
+    // Simulate Discharge Pressure:
+    // Target pressure based on motor steps (linear relationship up to max pressure).
     float targetPressureDischargeSim = dischargeMotor.getStepCount() * (maxPressureDischarge / (dischargeMotor.getMaxSteps() == 0 ? 1 : dischargeMotor.getMaxSteps())); 
     currentPressureDischarge += (targetPressureDischargeSim - currentPressureDischarge) * PRESSURE_RESPONSE_RATE;
-    inletFilo.push((int)(currentPressureInlet * 100)); dischargeFilo.push((int)(currentPressureDischarge * 100));
-    float flowReading = simulateFlowSensor(currentPressureInlet, currentPressureDischarge);
-    flowFilo.push((int)(flowReading * 100.0f)); currentFlow = flowFilo.average() / 100.0f;
-    sleep_us(avgSampTime);
-  }
-}
-void printBuffer(CircularBuffer &cb, const char *label, bool isInlet) {
-  Serial.printf("%s", label); 
-  for (int i = 0; i < cb.count; i++) {
-    int idx = (cb.start + i) % arraySize; float rawValue = cb.buffer[idx];
-    float pressure = rawValue / 100.0f; Serial.printf(",%.2f", pressure);
-  }
-  Serial.println(); delay(100);
-}
-void serial() { recvWithEndMarker(); showNewNumber(); }
-void recvWithEndMarker() {
-  static byte ndx = 0; char endMarker = '\n'; char rc;
-  if (Serial.available() > 0) {
-    rc = Serial.read();
-    if (rc != endMarker) { if (ndx < numChars - 1) { receivedChars[ndx++] = rc; } } 
-    else { receivedChars[ndx] = '\0'; ndx = 0; newData = true; }
-  }
-}
-void showNewNumber() { if (newData) { processSerialInput(); Serial.println(); newData = false; } }
 
-void processSerialInput() {
-  char *commaPosition = strchr(receivedChars, ',');
-  if (commaPosition != nullptr) {
-    *commaPosition = '\0'; float newInletPressure = atof(receivedChars); float newDischargePressure = atof(commaPosition + 1);
-    if (newInletPressure < -1.0f) newInletPressure = 0.0f; else if (newInletPressure > 0.0f) newInletPressure = 0.0f;
-    if (newDischargePressure < 0.0f) newDischargePressure = 0.0f; else if (newDischargePressure > 7.0f) newDischargePressure = 0.0f;
-    setPressureInlet = newInletPressure; setPressureDischarge = newDischargePressure;
-    inletMotor.setNotifyFlag(false); notifyInlet = false; 
-    inletMotor.resetTimeout(setPressureInlet);
-    if (setPressureInlet != 0) { inletMotor.setControlEnable(true); controlEnableInlet = true; }
-    dischargeMotor.setNotifyFlag(false); notifyDischarge = false; 
-    dischargeMotor.resetTimeout(setPressureDischarge);
-    if (setPressureDischarge != 0) { dischargeMotor.setControlEnable(true); controlEnableDischarge = true; }
-    Serial.printf("Set Pressures: Inlet = %.2f bar, Discharge = %.2f bar\n", setPressureInlet, setPressureDischarge);
-  } else { processCommand(); }
+    // Push scaled readings (multiplied by 100, as integers) into circular buffers.
+    inletFilo.push((int)(currentPressureInlet * 100));
+    dischargeFilo.push((int)(currentPressureDischarge * 100));
+
+    // Simulate and buffer flow reading.
+    float flowReading = simulateFlowSensor(currentPressureInlet, currentPressureDischarge);
+    flowFilo.push((int)(flowReading * 100.0f));
+    currentFlow = flowFilo.average() / 100.0f; // Update global smoothed flow value.
+
+    sleep_us(avgSampTime); // Sleep for the average sample time to maintain ~desired update rate.
+  }
 }
+
+// --- Print Buffer Function ---
+// Prints the contents of a circular buffer to serial, formatted as CSV.
+// `label`: Name for the data series (e.g., "Inlet").
+// `isInlet`: (Currently unused in function logic, but passed) Could be for specific formatting.
+void printBuffer(CircularBuffer &cb, const char *label, bool isInlet) {
+  Serial.printf("%s", label); // Print data series label.
+  for (int i = 0; i < cb.count; i++) {
+    int idx = (cb.start + i) % arraySize;
+    float rawValue = cb.buffer[idx];
+    float pressure = rawValue / 100.0f; // Scale back to float pressure value.
+    Serial.printf(",%.2f", pressure);   // Print value with 2 decimal places.
+  }
+  Serial.println(); // Newline after all values.
+  delay(100);       // Delay to allow serial print to complete, avoid flooding.
+}
+
+// --- Serial Handling Functions ---
+// `serial()`: Main serial routine, called repeatedly from loop().
+void serial() {
+  recvWithEndMarker(); // Check for incoming serial data.
+  showNewNumber();     // Process if new data is available.
+}
+
+// `recvWithEndMarker()`: Reads serial data until a newline character is received or buffer is full.
+// Sets `newData` flag when a complete command is ready.
+void recvWithEndMarker() {
+  static byte ndx = 0;          // Index for storing characters in receivedChars.
+  char endMarker = '\n';        // Command terminator.
+  char rc;                      // Character read from serial.
+
+  if (Serial.available() > 0) { // If there's data in the serial buffer...
+    rc = Serial.read();
+    if (rc != endMarker) {      // If it's not the end marker...
+      if (ndx < numChars - 1) { // And there's space in the buffer...
+        receivedChars[ndx++] = rc; // Store the character.
+      }
+      // Else: buffer full, character discarded.
+    } else { // If it IS the end marker...
+      receivedChars[ndx] = '\0'; // Null-terminate the string.
+      ndx = 0;                   // Reset index for next command.
+      newData = true;            // Flag that new data is ready.
+    }
+  }
+}
+
+// `showNewNumber()`: If `newData` is true, processes the received command and resets the flag.
+void showNewNumber() {
+  if (newData) {
+    processSerialInput(); // Main command processing logic.
+    Serial.println();     // Print a blank line for cleaner serial output.
+    newData = false;      // Reset flag.
+  }
+}
+
+// `processSerialInput()`: Parses incoming serial commands.
+// Differentiates between pressure setting commands (e.g., "-0.5,2.0") and text commands.
+void processSerialInput() {
+  // Check if the received string contains a comma, indicating a pressure set command.
+  char *commaPosition = strchr(receivedChars, ',');
+  if (commaPosition != nullptr) { // Comma found: interpret as "<inlet_pressure>,<discharge_pressure>"
+    *commaPosition = '\0'; // Split string at comma by replacing comma with null terminator.
+    float newInletPressure = atof(receivedChars); // Convert first part to float (inlet pressure).
+    float newDischargePressure = atof(commaPosition + 1); // Convert second part (discharge pressure).
+
+    // Apply safety limits to received pressures.
+    // Inlet typically operates <= 0 bar. This clamps it to 0 if positive value is sent.
+    if (newInletPressure < -1.0f) newInletPressure = 0.0f; // Min limit (e.g. -1 bar, or 0 if trying to go more negative)
+    else if (newInletPressure > 0.0f) newInletPressure = 0.0f; // Max limit (0 bar for this config)
+
+    // Discharge typically operates >= 0 bar.
+    if (newDischargePressure < 0.0f) newDischargePressure = 0.0f; // Min limit (0 bar)
+    else if (newDischargePressure > 7.0f) newDischargePressure = 0.0f; // Max limit (e.g. 7 bar, or 0 if trying to go higher)
+
+    setPressureInlet = newInletPressure;
+    setPressureDischarge = newDischargePressure;
+
+    // Reset notification flags for both motors.
+    inletMotor.setNotifyFlag(false); notifyInlet = false; 
+    // Enable motor control and reset timeout when a new setpoint is received.
+    // The managePressure function will determine actual motor movement.
+    inletMotor.setControlEnable(true);
+    controlEnableInlet = true;
+    inletMotor.resetTimeout(setPressureInlet); // Reset timeout for the new operation.
+
+    dischargeMotor.setNotifyFlag(false); notifyDischarge = false; 
+    dischargeMotor.setControlEnable(true);
+    controlEnableDischarge = true;
+    dischargeMotor.resetTimeout(setPressureDischarge);
+
+    Serial.printf("Set Pressures: Inlet = %.2f bar, Discharge = %.2f bar\n", setPressureInlet, setPressureDischarge);
+  } else { // No comma: interpret as a text command.
+    processCommand();
+  }
+}
+
+// Help message content: array of strings.
 const char *Help_Message[] = {
   "=== COMMAND LIST ===", "start                  - Enable pressure control for both motors",
   "stop                   - Disable pressure control for both motors", "start_inlet            - Enable pressure control for inlet motor",
@@ -484,35 +790,58 @@ const char *Help_Message[] = {
   "help                   - Show this help message", "======================", "=== INPUT FORMAT ===",
   "Inlet and Discharge Pressures: '<inlet_pressure>,<discharge_pressure>' (e.g., -0.5,1.0)",
 };
-void printHelpMessage() { for (size_t i = 0; i < sizeof(Help_Message) / sizeof(Help_Message[0]); i++) { Serial.println(Help_Message[i]); } }
 
+// Prints the help message to serial.
+void printHelpMessage() {
+  for (size_t i = 0; i < sizeof(Help_Message) / sizeof(Help_Message[0]); i++) {
+    Serial.println(Help_Message[i]);
+  }
+}
+
+// `processCommand()`: Handles text-based serial commands.
 void processCommand() {
-  serialStr = String(receivedChars); serialStr.trim();
+  serialStr = String(receivedChars); // Convert char array to Arduino String object.
+  serialStr.trim(); // Remove leading/trailing whitespace.
+
   if (serialStr == "stop") {
-    Serial.println(" OK! Both Motors Disabled"); inletMotor.setControlEnable(false); controlEnableInlet = false;
-    dischargeMotor.setControlEnable(false); controlEnableDischarge = false; reset = false; 
+    Serial.println(" OK! Both Motors Disabled");
+    inletMotor.setControlEnable(false); controlEnableInlet = false;
+    dischargeMotor.setControlEnable(false); controlEnableDischarge = false;
+    reset = false; // Ensure reset flag is cleared if motors are stopped.
   } else if (serialStr == "start") {
     Serial.println(" OK! Both Motors Enabled");
-    inletMotor.setControlEnable(true); controlEnableInlet = true; inletMotor.resetTimeout(setPressureInlet); 
-    inletMotor.setNotifyFlag(false); notifyInlet = false;
-    dischargeMotor.setControlEnable(true); controlEnableDischarge = true; dischargeMotor.resetTimeout(setPressureDischarge);
-    dischargeMotor.setNotifyFlag(false); notifyDischarge = false; reset = false; 
+    inletMotor.setControlEnable(true); controlEnableInlet = true;
+    inletMotor.resetTimeout(setPressureInlet); // Reset timeout on start.
+    inletMotor.setNotifyFlag(false); notifyInlet = false; // Clear notification.
+
+    dischargeMotor.setControlEnable(true); controlEnableDischarge = true;
+    dischargeMotor.resetTimeout(setPressureDischarge);
+    dischargeMotor.setNotifyFlag(false); notifyDischarge = false;
+    reset = false; // Clear reset flag.
   } else if (serialStr == "stop_inlet") {
-    Serial.println(" OK! Inlet Motor Disabled"); inletMotor.setControlEnable(false); controlEnableInlet = false;
+    Serial.println(" OK! Inlet Motor Disabled");
+    inletMotor.setControlEnable(false); controlEnableInlet = false;
   } else if (serialStr == "start_inlet") {
-    Serial.println(" OK! Inlet Motor Enabled"); inletMotor.setControlEnable(true); controlEnableInlet = true;
-    inletMotor.resetTimeout(setPressureInlet); inletMotor.setNotifyFlag(false); notifyInlet = false;
+    Serial.println(" OK! Inlet Motor Enabled");
+    inletMotor.setControlEnable(true); controlEnableInlet = true;
+    inletMotor.resetTimeout(setPressureInlet);
+    inletMotor.setNotifyFlag(false); notifyInlet = false;
   } else if (serialStr == "stop_discharge") {
-    Serial.println(" OK! Discharge Motor Disabled"); dischargeMotor.setControlEnable(false); controlEnableDischarge = false;
+    Serial.println(" OK! Discharge Motor Disabled");
+    dischargeMotor.setControlEnable(false); controlEnableDischarge = false;
   } else if (serialStr == "start_discharge") {
-    Serial.println(" OK! Discharge Motor Enabled"); dischargeMotor.setControlEnable(true); controlEnableDischarge = true;
-    dischargeMotor.resetTimeout(setPressureDischarge); dischargeMotor.setNotifyFlag(false); notifyDischarge = false;
-  } else if (serialStr.startsWith("maxStepsInlet")) {
-    long val = serialStr.substring(13).toInt(); maxStepsInlet = val; 
+    Serial.println(" OK! Discharge Motor Enabled");
+    dischargeMotor.setControlEnable(true); controlEnableDischarge = true;
+    dischargeMotor.resetTimeout(setPressureDischarge);
+    dischargeMotor.setNotifyFlag(false); notifyDischarge = false;
+  } else if (serialStr.startsWith("maxStepsInlet")) { // Command: "maxStepsInlet:VALUE"
+    long val = serialStr.substring(13).toInt(); // Extract value after colon.
+    maxStepsInlet = val; // Update global variable (Note: MotorController object itself is not updated here dynamically).
     Serial.print(" OK! Global maxStepsInlet set to "); Serial.println(maxStepsInlet);
     Serial.println(" Note: Restart or re-init motor object required for this to take full effect if not dynamically settable.");
-  } else if (serialStr.startsWith("maxStepsDischarge")) {
-    long val = serialStr.substring(17).toInt(); maxStepsDischarge = val; 
+  } else if (serialStr.startsWith("maxStepsDischarge")) { // Command: "maxStepsDischarge:VALUE"
+    long val = serialStr.substring(17).toInt();
+    maxStepsDischarge = val;
     Serial.print(" OK! Global maxStepsDischarge set to "); Serial.println(maxStepsDischarge);
     Serial.println(" Note: Restart or re-init motor object required for this to take full effect if not dynamically settable.");
   } else if (serialStr == "steps") {
@@ -522,31 +851,51 @@ void processCommand() {
                   inletMotor.isControlEnabled() ? "true" : "false", dischargeMotor.isControlEnabled() ? "true" : "false");
     Serial.printf(" Global reset flag: %s\n", reset ? "true" : "false");
   } else if (serialStr == "reset") {
-    Serial.println(" Initiating reset for both motors..."); reset = true; 
+    Serial.println(" Initiating reset for both motors...");
+    reset = true; // Set global reset flag. managePressure will pick this up.
+
+    // The following direct calls to managePressure and resetMotor are attempts to expedite
+    // the reset process. The primary mechanism is the `reset` flag checked in `loop()`.
     Serial.println("Directly attempting Inlet motor reset sequence via managePressure...");
-    inletMotor.managePressure(false, true); 
+    inletMotor.managePressure(false, true); // Ask managePressure to handle reset.
     Serial.println("Directly attempting Discharge motor reset sequence via managePressure...");
     dischargeMotor.managePressure(false, true); 
+
     Serial.println("Re-attempting reset via direct blocking calls:");
-    bool inletResetDone = inletMotor.resetMotor(); 
+    bool inletResetDone = inletMotor.resetMotor(); // Direct, blocking call.
     if (inletResetDone) { Serial.println("Inlet motor reset sequence reported success by direct call."); } 
     else { Serial.println("Inlet motor reset sequence reported failure or timeout by direct call."); }
-    bool dischargeResetDone = dischargeMotor.resetMotor(); 
+
+    bool dischargeResetDone = dischargeMotor.resetMotor(); // Direct, blocking call.
     if (dischargeResetDone) { Serial.println("Discharge motor reset sequence reported success by direct call."); } 
     else { Serial.println("Discharge motor reset sequence reported failure or timeout by direct call."); }
-    if (inletResetDone && dischargeResetDone) { Serial.println("Both motors reported reset completion by direct calls."); reset = false; } 
-    else { Serial.println("One or both motors failed to reset via direct calls. Global 'reset' flag remains true."); }
+
+    // If both blocking calls report success, clear the global reset flag.
+    // Otherwise, it remains true, and `loop()` will continue trying to reset via `managePressure`.
+    if (inletResetDone && dischargeResetDone) {
+        Serial.println("Both motors reported reset completion by direct calls.");
+        reset = false;
+    } else {
+        Serial.println("One or both motors failed to reset via direct calls. Global 'reset' flag remains true.");
+    }
   } else if (serialStr == "config") {
     Serial.println("==== CONFIG (via Motor Objects where applicable) ====");
     Serial.printf("Max Steps - Inlet: %ld, Discharge: %ld\n", inletMotor.getMaxSteps(), dischargeMotor.getMaxSteps());
     Serial.printf("Inlet Target Pressure for Reset: %.2f\n", inletMotor._minPressureForReset);
     Serial.printf("Discharge Target Pressure for Reset: %.2f\n", dischargeMotor._minPressureForReset);
     Serial.println("================");
-  } else if (serialStr == "help") { printHelpMessage(); } 
-  else if (serialStr == "stream") { streamPressure = true; Serial.println("Pressure streaming started"); } 
-  else if (serialStr == "stop_stream") { streamPressure = false; Serial.println("Pressure streaming stopped"); } 
-  else { Serial.println("Unknown command. Type 'help' for available options."); }
+  } else if (serialStr == "help") {
+    printHelpMessage();
+  } else if (serialStr == "stream") {
+    streamPressure = true;
+    Serial.println("Pressure streaming started");
+  } else if (serialStr == "stop_stream") {
+    streamPressure = false;
+    Serial.println("Pressure streaming stopped");
+  } else {
+    Serial.println("Unknown command. Type 'help' for available options.");
+  }
 }
-// Orphaned functions, logic moved/integrated
+// Orphaned functions, logic moved/integrated elsewhere or removed if obsolete.
 // void controlInletPressure() { /* ... */ }
 // void controlDischargePressure() { /* ... */ }
