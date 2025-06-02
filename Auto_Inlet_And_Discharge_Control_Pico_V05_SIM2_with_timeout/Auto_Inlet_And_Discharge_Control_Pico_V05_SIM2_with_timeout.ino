@@ -628,12 +628,11 @@ void loop() {
 
   targetPressure = inletTargetAchieved; // Update global flag used by inletMotor.managePressure().
 
-  // If target was not achieved (or was achieved then lost), reset the notification flag.
-  // This allows the "achieved" message to trigger again if pressure re-enters tolerance.
-  if (!targetPressure && inletMotor.getTargetAchievedMsgPrinted()) {
-      inletMotor.setTargetAchievedMsgPrinted(false);
-      // Serial.println("Inlet target pressure lost or not yet achieved."); // Optional debug line
-  }
+  // The _targetAchievedMsgPrintedFlagRef (and corresponding global targetAchievedMsgPrintedInlet)
+  // should now only be reset by a new command (in processSerialInput or processCommand).
+  // It is no longer reset here if pressure drifts out of tolerance.
+  // The 'adjusting...' message logic in stepMotor relies on this flag remaining true
+  // until a new command or explicit state change.
   // End of new logic for inlet targetPressure determination
 
   // Call the inlet motor's pressure management function.
@@ -657,10 +656,8 @@ void loop() {
       }
   } else {
       targetDischargePressure = false;
-      if(dischargeMotor.getTargetAchievedMsgPrinted()){ // If target lost, reset notify flag
-          dischargeMotor.setTargetAchievedMsgPrinted(false);
-          // Serial.println("Discharge target pressure lost or not yet achieved."); // Optional debug
-      }
+      // The _targetAchievedMsgPrintedFlagRef (and corresponding global targetAchievedMsgPrintedDischarge)
+      // should now only be reset by a new command.
   }
   // Call the discharge motor's pressure management function.
   dischargeMotor.managePressure(targetDischargePressure, reset);
