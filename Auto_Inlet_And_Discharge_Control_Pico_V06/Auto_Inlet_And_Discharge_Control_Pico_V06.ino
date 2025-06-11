@@ -20,31 +20,31 @@ bool reset = false;          // Global flag to indicate if the system or motors 
 const float MY_ADC_RESOLUTION = 4095.0;
 
 // Inlet Pressure Sensor Configuration
-const float INLET_SENSOR_SCALE = 0.99;   // Scale factor for the inlet pressure sensor.
-const float INLET_SENSOR_RANGE = 2.0;    // Sensor measurement range (e.g., -1 to +1 bar relative, so 2 bar total span).
-const float INLET_SENSOR_OFFSET = 0.0f;  // Offset value for the inlet pressure sensor.
+const float INLET_SENSOR_SCALE = 0.99;     // Scale factor for the inlet pressure sensor.
+const float INLET_SENSOR_RANGE = 2.0;      // Sensor measurement range (e.g., -1 to +1 bar relative, so 2 bar total span).
+const float INLET_SENSOR_OFFSET = -1.00f;  // Offset value for the inlet pressure sensor.
 // Conversion factor: (Range * Scale) / ADC_Resolution. Used to convert ADC reading to pressure (bar).
 const float INLET_PRESSURE_CONV = (INLET_SENSOR_RANGE * INLET_SENSOR_SCALE / MY_ADC_RESOLUTION);
 
 // Discharge Pressure Sensor Configuration
 const float DISCHARGE_SENSOR_SCALE = 1.0;     // Scale factor for the discharge pressure sensor.
 const float DISCHARGE_SENSOR_RANGE = 10.0;    // Sensor measurement range (e.g., 0 to 10 bar).
-const float DISCHARGE_SENSOR_OFFSET = -0.08;  // Offset value for the discharge pressure sensor.
+const float DISCHARGE_SENSOR_OFFSET = -0.07;  // Offset value for the discharge pressure sensor.
 // Conversion factor: (Range * Scale) / ADC_Resolution. Used to convert ADC reading to pressure (bar).
 const float DISCHARGE_PRESSURE_CONV = (DISCHARGE_SENSOR_RANGE * DISCHARGE_SENSOR_SCALE / MY_ADC_RESOLUTION);
 
 // Flow Sensor Configuration (Placeholders - Adjust to actual sensor)
 const float FLOW_SENSOR_SCALE = 1.0;    // Scale factor for the flow sensor.
-const float FLOW_SENSOR_RANGE = 5.0;    // Sensor measurement range (e.g., 0-5 L/min).
+const float FLOW_SENSOR_RANGE = 3.0;    // Sensor measurement range (e.g., 0-5 L/min).
 const float FLOW_SENSOR_OFFSET = 0.0f;  // Offset value for the flow sensor.
 // Conversion factor: (Range * Scale) / ADC_Resolution. Used to convert ADC reading to flow units (e.g., L/min).
 const float FLOW_CONV = (FLOW_SENSOR_RANGE * FLOW_SENSOR_SCALE / MY_ADC_RESOLUTION);
-
+enum SensorType {INLET, DISCHARGE, FLOW}; //Sensoe types for the printBuffer() function.
 // === Pin Definitions ===
 // ADC Pins (Physical ADC channels on RP2040)
-const int inletAnalogPin = 0;      // ADC0, corresponds to GPIO26. For reading inlet pressure.
-const int dischargeAnalogPin = 1;  // ADC1, corresponds to GPIO27. For reading discharge pressure.
-const int flowAnalogPin = 2;  // ADC2, corresponds to GPIO28. For reading flow meter.
+const int inletAnalogPin = 26;      // ADC0, corresponds to GPIO26. For reading inlet pressure.
+const int dischargeAnalogPin = 27;  // ADC1, corresponds to GPIO27. For reading discharge pressure.
+const int flowAnalogPin = 28;       // ADC2, corresponds to GPIO28. For reading flow meter.
 
 // Inlet Motor Control Pins (GPIO pin numbers)
 const int stepPinInlet = 4;  // STEP pin for the inlet motor driver.
@@ -58,8 +58,8 @@ const int enaPinDischarge = 6;   // ENABLE pin for the discharge motor driver. (
 
 // Maximum steps for each motor (used in MotorController constructor).
 // These define the operational range of the motors in terms of steps.
-long maxStepsInlet = 32500;      // Maximum steps the inlet motor can take from its zero position.
-long maxStepsDischarge = 35000;  // Maximum steps the discharge motor can take from its zero position.
+long maxStepsInlet = 325000;      // Maximum steps the inlet motor can take from its zero position.
+long maxStepsDischarge = 350000;  // Maximum steps the discharge motor can take from its zero position.
 
 // Step intervals (microseconds) for motor speed control (used in MotorController constructor).
 long intervalRunInlet = 200;           // Target interval (µs) for inlet motor when running at speed (shorter = faster).
@@ -73,7 +73,7 @@ long accelerationStepsDischarge = 1500;  // Number of steps for discharge motor 
 
 // Timeout duration for pressure control operations (milliseconds).
 // If a motor tries to reach a set pressure and takes longer than this, it will time out.
-const unsigned long timeoutDuration = 60000;  // 60 seconds.
+const unsigned long timeoutDuration = 180000;  // 180 seconds.
 
 // Pressure Variables
 volatile float currentPressureInlet = 0.0;      // Current measured pressure for the inlet (bar). 'volatile' as it's updated by core1 and read by core0.
@@ -82,17 +82,12 @@ float setPressureInlet = 0.0;                   // Target pressure for the inlet
 float setPressureDischarge = 0.0;               // Target pressure for the discharge (bar), set via serial command.
 
 // Tolerances and Limits for Pressure Control (some passed to MotorController)
-float pressureToleranceInlet = 0.02f;      // Allowed deviation (bar) from setPressureInlet to be considered "on target".
-float pressureToleranceDischarge = 0.05f;  // Allowed deviation (bar) from setPressureDischarge.
+float pressureToleranceInlet = 0.025f;      // Allowed deviation (bar) from setPressureInlet to be considered "on target".
+float pressureToleranceDischarge = 0.025f;  // Allowed deviation (bar) from setPressureDischarge.
 float maxPressureInlet = 0.0f;             // Maximum allowable pressure for inlet (currently 0.0, meaning inlet is for vacuum/negative pressure).
 float minimumPressureInlet = -1.0f;        // Minimum allowable pressure for inlet (e.g., -1.0 bar).
 float maxPressureDischarge = 7.0f;         // Maximum allowable pressure for discharge (e.g., 7.0 bar).
 float minimumPressureDischarge = 0.2f;     // Minimum pressure for discharge when resetting (acts as a reset threshold).
-
-// Pressure simulation parameters (used in pressureSensorCore1)
-const float PRESSURE_RESPONSE_RATE = 0.05f;  // How quickly the simulated pressure approaches the target pressure based on motor steps. (0 to 1)
-// Simulated pressure change per step for the inlet motor. Assumes linear relationship.
-const float INLET_PRESSURE_PER_STEP = minimumPressureInlet / maxStepsInlet;
 
 // Global Flags for System State
 bool targetPressure = false;                     // True if inlet motor has reached its target pressure.
@@ -104,14 +99,14 @@ bool controlEnableDischarge = true;              // Master enable/disable for di
 
 // Global Overshoot Control Parameters (passed to MotorController constructor)
 // These help manage and correct if the motor moves the pressure beyond the setpoint.
-int reverseStepsInlet = 20;        // Number of steps to reverse inlet motor if overshoot is detected.
+int reverseStepsInlet = 3000;      // Number of steps to reverse inlet motor if overshoot is detected.
 float slowFactorInlet = 0.5f;      // Factor to slow down inlet motor during overshoot recovery (e.g., 0.5 = half speed).
-int reverseStepsDischarge = 20;    // Number of steps to reverse discharge motor if overshoot is detected.
+int reverseStepsDischarge = 1000;  // Number of steps to reverse discharge motor if overshoot is detected.
 float slowFactorDischarge = 0.5f;  // Factor to slow down discharge motor during overshoot recovery.
 
 // === Circular Buffer Configuration ===
 // Used for averaging sensor readings to smooth out noise.
-const int arraySize = 20;               // Number of samples to store in the circular buffer.
+const int arraySize = 250;              // Number of samples to store in the circular buffer.
 int avgSampTime = 1000000 / arraySize;  // Target sampling time (µs) per sample to fill the buffer over 1 second.
 
 // === Serial Communication ===
@@ -284,6 +279,12 @@ public:
 
   // Returns the current step count of the motor.
   long getStepCount() {
+    return _stepCount;
+  }
+
+  // Returns the current step count of the motor + 2500 step to allow the motor to go further backwards.
+  long increaseStepCount() {
+    _stepCount = _stepCount + 2500;
     return _stepCount;
   }
 
@@ -596,7 +597,7 @@ MotorController dischargeMotor(
   true,                                                                                                       // _motorDirectionSetting
   currentPressureDischarge, setPressureDischarge, controlEnableDischarge, targetAchievedMsgPrintedDischarge,  // References
   minimumPressureDischarge,                                                                                   // _minPressureForReset (discharge resets to a minimum positive pressure)
-  0.2f, 4.0f, 0.0f, 1.0f,                                                                                     // Slowdown: Threshold2 is 0.0f, Factor2 is 1.0f (effectively one slowdown stage)
+  0.2f, 8.0f, 0.0f, 1.0f,                                                                                     // Slowdown: Threshold2 is 0.0f, Factor2 is 1.0f (effectively one slowdown stage)
   "Discharge",                                                                                                // Name
   reverseStepsDischarge, slowFactorDischarge, pressureToleranceDischarge                                      // Overshoot parameters
 );
@@ -610,10 +611,10 @@ void pressureSensorCore1();
 void setup() {
   Serial.begin(115200);  // Initialize serial communication at 115200 baud.
 
-  adc_init();                 // Initialize the ADC peripheral
-  adc_gpio_init(inletAnalogPin);    // Initialize GPIO26 for ADC input (ADC0)
-  adc_gpio_init(dischargeAnalogPin); // Initialize GPIO27 for ADC input (ADC1)
-  adc_gpio_init(flowAnalogPin);      // Initialize GPIO28 for ADC input (ADC2)
+  adc_init();                         // Initialize the ADC peripheral
+  adc_gpio_init(inletAnalogPin);      // Initialize GPIO26 for ADC input (ADC0)
+  adc_gpio_init(dischargeAnalogPin);  // Initialize GPIO27 for ADC input (ADC1)
+  adc_gpio_init(flowAnalogPin);       // Initialize GPIO28 for ADC input (ADC2)
 
   // Launch the pressureSensorCore1 function on the second core (core1).
   // Core1 will independently run pressureSensorCore1 in a loop.
@@ -650,7 +651,7 @@ void loop() {
     else if (setPressureInlet == 0) {
       // Target achieved if pressure is near zero AND step count is zero.
       // Overshoot recovery state is less critical here, focus is on reaching physical zero.
-      if (fabs(currentPressureInlet) <= pressureToleranceInlet && inletMotor.getStepCount() == 0) {
+      if (inletMotor.getStepCount() == 0) {
         inletTargetAchieved = true;
         if (!inletMotor.getTargetAchievedMsgPrinted()) {
           Serial.println("Inlet zero position achieved");
@@ -693,7 +694,7 @@ void loop() {
       dischargeMotor.setTargetAchievedMsgPrinted(true);
       dischargeMotor._adjustingMsgPrinted = false;
     }
-  } else if (setPressureDischarge == 0 && fabs(currentPressureDischarge) <= pressureToleranceDischarge && dischargeMotor.getStepCount() == 0 && !reset) {
+  } else if (setPressureDischarge == 0 && dischargeMotor.getStepCount() == 0 && !reset) {
     targetDischargePressure = true;
     if (!dischargeMotor.getTargetAchievedMsgPrinted()) {
       Serial.println("Discharge zero position achieved");
@@ -713,9 +714,9 @@ void loop() {
   if (streamPressure && millis() - lastStreamTime >= streamInterval) {
     lastStreamTime = millis();  // Reset stream timer.
     // Print data from circular buffers (which are updated by core1).
-    printBuffer(inletFilo, "Inlet", true);
-    printBuffer(dischargeFilo, "Discharge", false);
-    printBuffer(flowFilo, "Flow", false);
+    printBuffer(inletFilo, "Inlet", INLET);
+    printBuffer(dischargeFilo, "Discharge", DISCHARGE);
+    printBuffer(flowFilo, "Flow", FLOW);
     delay(10);  // Small delay to allow serial buffer to flush.
   }
 }
@@ -728,26 +729,26 @@ void loop() {
 void pressureSensorCore1() {
   while (true) {  // Continuous loop on core1.
     // Read Inlet Pressure
-    adc_select_input(inletAnalogPin);
+    adc_select_input(0);
+    sleep_us(10);
     uint16_t rawInlet = adc_read();
-    currentPressureInlet = (rawInlet * INLET_PRESSURE_CONV) + INLET_SENSOR_OFFSET;
+    inletFilo.push(rawInlet);
+    currentPressureInlet = (inletFilo.average() * INLET_PRESSURE_CONV) + INLET_SENSOR_OFFSET;
 
     // Read Discharge Pressure
-    adc_select_input(dischargeAnalogPin);
+    adc_select_input(1);
+    sleep_us(10);
     uint16_t rawDischarge = adc_read();
-    currentPressureDischarge = (rawDischarge * DISCHARGE_PRESSURE_CONV) + DISCHARGE_SENSOR_OFFSET;
+    dischargeFilo.push(rawDischarge);
+    currentPressureDischarge = (dischargeFilo.average() * DISCHARGE_PRESSURE_CONV) + DISCHARGE_SENSOR_OFFSET;
 
     // Read Flow
-    adc_select_input(flowAnalogPin);
+    adc_select_input(2);
+    sleep_us(10);
     uint16_t rawFlow = adc_read();
+    flowFilo.push(rawFlow);
     // Use global constants for flow conversion
-    float convertedFlow = (rawFlow * FLOW_CONV) + FLOW_SENSOR_OFFSET;
-
-    // Push to circular buffers
-    inletFilo.push((int)(currentPressureInlet * 100));
-    dischargeFilo.push((int)(currentPressureDischarge * 100));
-    flowFilo.push((int)(convertedFlow * 100.0f));
-    currentFlow = flowFilo.average() / 100.0f; // Update global smoothed flow value.
+    currentFlow = (flowFilo.average() * FLOW_CONV) + FLOW_SENSOR_OFFSET;
 
     sleep_us(avgSampTime);  // Sleep for the average sample time to maintain ~desired update rate.
   }
@@ -757,16 +758,32 @@ void pressureSensorCore1() {
 // Prints the contents of a circular buffer to serial, formatted as CSV.
 // `label`: Name for the data series (e.g., "Inlet").
 // `isInlet`: (Currently unused in function logic, but passed) Could be for specific formatting.
-void printBuffer(CircularBuffer& cb, const char* label, bool isInlet) {
+void printBuffer(CircularBuffer& cb, const char* label, SensorType type) {
   Serial.printf("%s", label);  // Print data series label.
+
   for (int i = 0; i < cb.count; i++) {
     int idx = (cb.start + i) % arraySize;
-    float rawValue = cb.buffer[idx];
-    float pressure = rawValue / 100.0f;  // Scale back to float pressure value.
-    Serial.printf(",%.2f", pressure);    // Print value with 2 decimal places.
+    uint16_t rawValue = cb.buffer[idx];  // Get raw ADC value.
+
+    float convertedValue;
+
+    switch (type) {
+      case INLET:
+        convertedValue = (rawValue * INLET_PRESSURE_CONV) + INLET_SENSOR_OFFSET;
+        break;
+      case DISCHARGE:
+        convertedValue = (rawValue * DISCHARGE_PRESSURE_CONV) + DISCHARGE_SENSOR_OFFSET;
+        break;
+      case FLOW:
+        convertedValue = (rawValue * FLOW_CONV) + FLOW_SENSOR_OFFSET;
+        break;
+    }
+
+    Serial.printf(",%.2f", convertedValue);  // Print converted value.
   }
+
   Serial.println();  // Newline after all values.
-  delay(100);        // Delay to allow serial print to complete, avoid flooding.
+  delay(100);        // Delay to avoid flooding serial output.
 }
 
 // --- Serial Handling Functions ---
@@ -973,6 +990,14 @@ void processCommand() {
     dischargeMotor.setTargetAchievedMsgPrinted(false);
     targetAchievedMsgPrintedDischarge = false;
     dischargeMotor._adjustingMsgPrinted = false;
+  } else if (serialStr == "back_inlet") {
+    Serial.println(" OK! Move inlet motor backwards");
+    inletMotor.increaseStepCount();
+
+  } else if (serialStr == "back_discharge") {
+    Serial.println(" OK! Move discharge motor backwards");
+    dischargeMotor.increaseStepCount();
+
   } else if (serialStr.startsWith("maxStepsInlet")) {  // Command: "maxStepsInlet:VALUE"
     long val = serialStr.substring(13).toInt();        // Extract value after colon.
     maxStepsInlet = val;                               // Update global variable (Note: MotorController object itself is not updated here dynamically).
@@ -988,9 +1013,11 @@ void processCommand() {
   } else if (serialStr == "steps") {
     Serial.printf(" Inlet Steps: %ld (Current P: %.2f bar, Target P: %.2f bar)\n", inletMotor.getStepCount(), currentPressureInlet, setPressureInlet);
     Serial.printf(" Discharge Steps: %ld (Current P: %.2f bar, Target P: %.2f bar)\n", dischargeMotor.getStepCount(), currentPressureDischarge, setPressureDischarge);
+    Serial.printf(" Flow rate: %.2f (L/min)\n", currentFlow);
     Serial.printf(" Inlet motor enabled: %s\tDischarge motor enabled: %s\n",
                   inletMotor.isControlEnabled() ? "true" : "false", dischargeMotor.isControlEnabled() ? "true" : "false");
     Serial.printf(" Global reset flag: %s\n", reset ? "true" : "false");
+    Serial.printf(" Inlet ADC Raw: %.2f, Discharge  ADC Raw: %.2f, Flow  ADC Raw: %.2f\n", inletFilo.average(), dischargeFilo.average(), flowFilo.average());
   } else if (serialStr == "reset") {
     Serial.println(" Initiating reset for both motors...");
     reset = true;  // Set global reset flag. managePressure will pick this up.
